@@ -1,0 +1,4184 @@
+---
+title: "merge_data"
+author: "Anders Kiledal"
+date: '2022-04-13'
+output: html_document
+---
+```{r setup, include=FALSE}
+#Set working directory to project root
+knitr::opts_knit$set(root.dir = here::here())
+
+#Load packages
+library(tidyverse)
+library(ggpubr)
+library(patchwork)
+library(lefser)
+library(phyloseq)
+
+set.seed(54321)
+```
+
+## Import data
+
+### Sample metadata
+```{r}
+metadata <- read_tsv("data/metadata.tsv")
+```
+
+
+### Taxonomy
+```{r}
+tax_18 <- read_tsv("data/2018_RDP_taxonomy.txt") %>% 
+  mutate(OTU = paste0("2018_",OTU)) %>% 
+  select(-Size)
+
+tax_19 <- read_tsv("data/2019_taxonomy.txt") %>% 
+  mutate(OTU = paste0("2019_",OTU)) %>% 
+  select(-Size)
+
+tax_22a <- read_tsv("data/2022.OTUs.taxonomy") %>% 
+  mutate(OTU = paste0("2022a_",OTU)) %>% 
+  select(-Size)
+
+tax_22b <- read_tsv("data/2022B.OTUs.taxonomy") %>% 
+  mutate(OTU = paste0("2022b_",OTU)) %>% 
+  select(-Size)
+
+tax_levels <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus")
+
+
+combined_tax <- bind_rows(tax_18,tax_19, tax_22a, tax_22b) %>%
+  mutate(Taxonomy = str_remove_all(Taxonomy, "\\([0-9]*\\)")) %>%
+  separate(Taxonomy, tax_levels, sep = ";") %>%
+  mutate(Genus = if_else(str_detect(Class,"Clostridia"), "Clostridia",Genus))
+
+combined_tax_unmodified <- bind_rows(tax_18,tax_19, tax_22a, tax_22b) %>%
+  mutate(Taxonomy = str_remove_all(Taxonomy, "\\([0-9]*\\)")) %>%
+  separate(Taxonomy, tax_levels, sep = ";")
+
+O2_sens_tax <- read_csv("data/obligate_and_facultative.csv") %>%
+  pivot_longer(everything(), names_to = "O2_sensitivity", values_to = "Genus") %>%
+  filter(!is.na(Genus)) %>%
+  select(Genus, O2_sensitivity) %>%
+  mutate(Genus = if_else(str_detect(Genus,"Clostridium"), "Clostridia",Genus))
+
+
+# combined_tax <- bind_rows(tax_18,tax_19) %>% 
+#   mutate(Taxonomy = str_remove_all(Taxonomy, "\\([0-9]*\\)")) %>% 
+#   separate(Taxonomy, tax_levels, sep = ";") %>% 
+#   mutate(Genus = if_else(str_detect(Genus,"Clostridium"), "Clostridium",Genus))
+# 
+# O2_sens_tax <- read_csv("data/obligate_and_facultative.csv") %>% 
+#   pivot_longer(everything(), names_to = "O2_sensitivity", values_to = "Genus") %>% 
+#   filter(!is.na(Genus)) %>% 
+#   select(Genus, O2_sensitivity) %>% 
+#   mutate(Genus = if_else(str_detect(Genus,"Clostridium"), "Clostridium",Genus))
+```
+
+### Abundance tables
+```{r}
+abund_18 <- read_tsv("data/2018_abund_table.tsv") %>% 
+  select(sample ="Group", everything(), -numOtus, -label) %>% 
+  rename_with(~paste0("2018_",.x),-sample) %>% 
+  mutate(sample = paste0("2018_",sample)) %>% 
+  pivot_longer(-sample, names_to = "OTU", values_to = "abund") %>% 
+  filter(abund > 0)
+
+abund_19 <- read_tsv("data/2019_abund.tsv") %>% 
+  select(sample ="Group", everything(), -numOtus, -label) %>% 
+  rename_with(~paste0("2019_",.x),-sample) %>% 
+  mutate(sample = paste0("2019_",sample)) %>% 
+  pivot_longer(-sample, names_to = "OTU", values_to = "abund") %>% 
+  filter(abund > 0)
+
+abund_22a <- read_tsv("data/2022.OTUs.absolute.abundance.shared") %>% 
+  select(sample ="Group", everything(), -numOtus, -label) %>% 
+  rename_with(~paste0("2022a_",.x),-sample) %>% 
+  mutate(sample = paste0("2022a_",sample)) %>% 
+  pivot_longer(-sample, names_to = "OTU", values_to = "abund") %>% 
+  filter(abund > 0)
+
+abund_22b <- read_tsv("data/2022B.OTUs.absolute.abundance.shared") %>% 
+  select(sample ="Group", everything(), -numOtus, -label) %>% 
+  rename_with(~paste0("2022b_",.x),-sample) %>% 
+  mutate(sample = paste0("2022b_",sample)) %>% 
+  pivot_longer(-sample, names_to = "OTU", values_to = "abund") %>% 
+  filter(abund > 0)
+
+
+wide_abund_22a <- read_tsv("data/2022.OTUs.absolute.abundance.shared") %>% 
+  select(sample ="Group", everything(), -numOtus, -label) %>% 
+  rename_with(~paste0("2022a_",.x),-sample) %>% 
+  mutate(sample = paste0("2022a_",sample)) %>% 
+  column_to_rownames("sample")
+
+ps <- otu_table(wide_abund_22a,taxa_are_rows = FALSE)
+
+norm_22 <- rarefy_even_depth(ps,replace = FALSE,rngseed = 342)
+
+combined_abund <- bind_rows(abund_18, abund_19, abund_22a, abund_22b)
+
+sample_depths <- combined_abund %>% group_by(sample) %>% summarise(abund = sum(abund)) %>% arrange(abund)
+
+norm_combined_abund <- combined_abund %>% 
+  pivot_wider(names_from = sample,values_from = abund) %>% 
+  column_to_rownames("OTU") %>% 
+  mutate(across(everything(), ~replace_na(.x,0))) %>% 
+  otu_table(taxa_are_rows = TRUE) %>% 
+  rarefy_even_depth(sample.size = 5000,replace = FALSE,rngseed = 342) %>% 
+  as.data.frame() %>% 
+  rownames_to_column("OTU") %>% 
+  pivot_longer(-OTU, names_to = "sample", values_to = "norm_abund")
+
+norm_OTU_rel_abund_wide_unmod <- norm_combined_abund %>% 
+  left_join(combined_tax_unmodified) %>% 
+  group_by(sample) %>% 
+  mutate(rel_abund = norm_abund / sum(norm_abund)) %>% 
+  pivot_wider(-norm_abund, names_from = sample, values_from = rel_abund,values_fill = 0)
+
+
+# With Clostridia renamed
+combined_abund_w_tax <- combined_abund %>% 
+  left_join(combined_tax)
+
+combined_rel_abund_w_tax <- combined_abund_w_tax %>% 
+  group_by(sample) %>% 
+  mutate(abund = abund / sum(abund))
+
+genus_rel_abund <- combined_rel_abund_w_tax %>% 
+  group_by(sample, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund))
+
+genus_rel_abund_wide <- genus_rel_abund %>% 
+  pivot_wider(names_from = sample, values_from = abund,values_fill = 0) %>% 
+  write_csv("results/figure_data/genus_relative_abundance_wide.csv")
+
+
+# With Clostridium left alone
+combined_abund_w_tax_unmod <- combined_abund %>% 
+  left_join(combined_tax_unmodified)
+
+combined_rel_abund_w_tax_unmod <- combined_abund_w_tax_unmod %>% 
+  group_by(sample) %>% 
+  mutate(abund = abund / sum(abund))
+
+genus_rel_abund_unmod <- combined_rel_abund_w_tax_unmod %>% 
+  group_by(sample, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund))
+
+genus_rel_abund_wide_unmod <- genus_rel_abund_unmod %>% 
+  pivot_wider(names_from = sample, values_from = abund,values_fill = 0)
+
+OTU_rel_abund_unmod <- combined_rel_abund_w_tax_unmod # just for naming consistency
+
+OTU_rel_abund_wide_unmod <- OTU_rel_abund_unmod %>% 
+  pivot_wider(names_from = sample, values_from = abund,values_fill = 0)
+
+```
+
+Any apparent groupings?
+```{r}
+nmds <- genus_rel_abund_wide %>% 
+  ungroup() %>% 
+  select(-any_of(tax_levels)) %>% 
+  t() %>% 
+  vegan::metaMDS()
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(metadata)
+
+nmds_points %>% 
+  ggplot(aes(MDS1,MDS2, color = `syn/allo`, shape = mouse_type, desc = Description)) + 
+  geom_point()
+
+umap <- genus_rel_abund_wide %>% 
+  ungroup() %>% 
+  select(-any_of(tax_levels)) %>% 
+  t() %>% 
+  umap::umap()
+
+umap_points <- umap$layout %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(metadata)
+
+(umap_points %>% 
+  ggplot(aes(V1,V2, color = `syn/allo`, shape = mouse_type, desc = Description)) + 
+  geom_point() ) %>% plotly::ggplotly()
+```
+
+
+
+```{r}
+rel_abund_w_O2_sens <- combined_rel_abund_w_tax %>% 
+  left_join(O2_sens_tax) %>% 
+  left_join(metadata) %>% 
+  mutate(O2_sensitivity = case_when(O2_sensitivity == "Obligate anaerobe" ~ "Obligate\nanaerobe",
+                                    O2_sensitivity == "Facultative anaerobe" ~ "Facultative\nanaerobe",
+                                    is.na(O2_sensitivity) ~ "unknown"),
+         O2_sensitivity = factor(O2_sensitivity, levels = c("Obligate\nanaerobe", "Facultative\nanaerobe", "unknown"),ordered = TRUE))
+
+rel_abund_w_O2_sens_unmod <- combined_rel_abund_w_tax_unmod %>% 
+  left_join(O2_sens_tax) %>% 
+  left_join(metadata) %>% 
+  mutate(O2_sensitivity = case_when(O2_sensitivity == "Obligate anaerobe" ~ "Obligate\nanaerobe",
+                                    O2_sensitivity == "Facultative anaerobe" ~ "Facultative\nanaerobe",
+                                    is.na(O2_sensitivity) ~ "unknown"),
+         O2_sensitivity = factor(O2_sensitivity, levels = c("Obligate\nanaerobe", "Facultative\nanaerobe", "unknown"),ordered = TRUE))
+
+per_taxa_o2_sense <- rel_abund_w_O2_sens %>% 
+  mutate(o2_export_group = if_else(O2_sensitivity == "unknown", "other",Genus)) %>% 
+  ungroup() %>% 
+  group_by(o2_export_group,sample,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)) %>% 
+  pivot_wider(names_from = sample, values_from = abund,values_fill = 0) %>% 
+  dplyr::rename(Genus = "o2_export_group") %>% 
+  write_csv("results/figure_data/abundance_for_o2_groups.csv")
+
+rel_abund_w_O2_sens %>% 
+  filter(year == "2018",
+         O2_sensitivity != "unknown") %>% 
+  ungroup() %>% 
+  group_by(sample,group,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(abund, group, color = O2_sensitivity)) +
+  #geom_point() +
+  geom_boxplot() +
+  theme_bw()
+
+```
+## Comparison 1 (Fig. 1 in paper)
+B6 mice pre-transplant compared to allo B6 mice 2 weeks after transplant (before co-housing with B6 mice)
+```{r}
+comp1_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2018",
+         group %in% c("grp_1", "grp_2")) %>%
+  mutate(treatment = case_when(group == "grp_1" ~ "B6 pre-transplant",
+                               group == "grp_2" ~ "2 weeks post allo-BMT"),
+         treatment = factor(treatment,levels = c("B6 pre-transplant","2 weeks post allo-BMT"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  write_csv("results/figure_data/A_long.csv")
+
+comp1_data %>% 
+  pivot_wider(names_from = O2_sensitivity, values_from = abund) %>% 
+  write_csv("results/figure_data/A_wide.csv")
+
+(comp_1_plot <- comp1_data %>% 
+  ggplot(aes( x = O2_sensitivity, y= abund, color = treatment)) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.15)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_color_manual(values = c("black", "red")) +
+  labs(y = "Percent abundance", x = "Oxygen sensitivity", color = NULL) +
+  theme_bw()
+)
+
+ggsave("results/comparison_1.png" ,plot = comp_1_plot ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_1_plot_stats <- comp1_data %>% 
+  ggboxplot(x = "O2_sensitivity", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_1_stats.png" ,plot = comp_1_plot_stats ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_1_plot_stats_obligate <- comp1_data %>% 
+    ungroup() %>% 
+    group_by(group,treatment,sample) %>% 
+    mutate(O2_sensitivity =  as.character(O2_sensitivity),
+           O2_sensitivity = if_else(str_detect(O2_sensitivity, "Obligate"), "Obligate anaerobe", "Other")) %>% 
+    group_by(group,treatment,sample, O2_sensitivity) %>% 
+    summarise(abund = sum(abund)) %>%
+    write_csv("results/figure_data/A_long_obligates_vs_all.csv") %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = O2_sensitivity),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_1_stats_obligate.png" ,plot = comp_1_plot_stats_obligate ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+comp1_genus_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2018",
+         group %in% c("grp_1", "grp_2")) %>%
+  mutate(treatment = case_when(group == "grp_1" ~ "B6 pre-transplant",
+                               group == "grp_2" ~ "2 weeks post allo-BMT"),
+         treatment = factor(treatment,levels = c("B6 pre-transplant","2 weeks post allo-BMT"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,Genus,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+(comp1_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>% 
+  ggplot(aes(treatment, abund, color = O2_sensitivity)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  facet_wrap(~Genus, scales = "free_y") +
+  labs(x = NULL, y = "Percent abundance", color = "Oxygen\nsensitivity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -25, vjust = 1, hjust = 0))
+) %>% ggsave(plot =., filename = "results/comparison_1_genus.png",width = 3, height =2.5, dpi = 600, scale = 3)
+
+
+(comp1_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter",facet.by = "Genus") +
+  stat_compare_means(aes(treatment, abund), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    facet_wrap(~Genus,scales = "free_y") +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+)  
+
+ggsave(filename = "results/comparison_1_genus_stats.pdf",width = 3, height =3, dpi = 600, scale = 3)
+
+
+comp1_data_BF <- combined_rel_abund_w_tax %>% 
+  left_join(metadata) %>% 
+  filter(year == "2018",
+         group %in% c("grp_1", "grp_2")) %>%
+  mutate(treatment = case_when(group == "grp_1" ~ "B6 pre-transplant",
+                               group == "grp_2" ~ "2 weeks post allo-BMT"),
+         treatment = factor(treatment,levels = c("B6 pre-transplant","2 weeks post allo-BMT"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,Kingdom, Phylum) %>% 
+  mutate(Phylum = if_else(Phylum %in% c("Bacteroidetes", "Firmicutes"), Phylum, "other")) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+comp1_plot_BF <- comp1_data_BF %>% 
+  filter(Phylum != "other") %>% 
+ggboxplot(x = "Phylum", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+```
+### Lefse
+```{r}
+comp1_genus_data_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2018",
+         group %in% c("grp_1", "grp_2")) %>%
+  mutate(treatment = case_when(group == "grp_1" ~ "B6 pre-transplant",
+                               group == "grp_2" ~ "2 weeks post allo-BMT"),
+         treatment = factor(treatment,levels = c("B6 pre-transplant","2 weeks post allo-BMT"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,Genus,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100)
+
+comp1_pre_sumExp <- comp1_genus_data_lefse %>%
+  ungroup() %>% 
+  select(abund,Genus, sample) %>% 
+  pivot_wider(names_from = "sample", values_from = "abund",values_fill = 0) %>% 
+  column_to_rownames("Genus")
+
+exp_info1 <- comp1_genus_data %>% 
+  ungroup() %>% 
+  select(sample, treatment) %>% 
+  distinct() %>% 
+  column_to_rownames("sample") %>% 
+  mutate(GROUP = factor(treatment))
+
+comp1_sumExp <- SummarizedExperiment(comp1_pre_sumExp,colData = exp_info1)
+  
+comp1_lefse <- lefser(comp1_sumExp,groupCol = "treatment",kruskal.threshold = 0.05,lda.threshold = 0)
+
+lefserPlot(comp1_lefse) + scale_fill_manual(values = c("forestgreen", "red"), name = NULL, labels = c("B6 pre-transplant", "2 weeks post allo-BMT")) + theme_bw() + labs(x = NULL)
+```
+
+Export for external lefse
+```{r}
+comp1_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+ filter(year == "2018",
+         group %in% c("grp_1", "grp_2")) %>%
+  mutate(treatment = group,
+         treatment = factor(treatment,levels = c("grp_1","grp_2"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp1_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp1_ext_lefse2 <- comp1_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2018_40`)) %>% 
+  write_tsv("data/lefse/comp1_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp1_data.tsv  comp1_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp1_data.txt comp1_data.res -l 2
+
+lefse_plot_res.py comp1_data.res comp1_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp1_data.res comp1_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+## Comparison 2 (Fig. 3 in paper)
+
+(starting at 2 weeks post BMT) Allo mice either co-housed for 2 weeks with B6 mice or not co-housed (measured at day 28?)
+```{r}
+comp2_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2018",
+         group %in% c("grp_4", "grp_5")) %>%
+  mutate(treatment = case_when(group == "grp_4" ~ "Allo B6 2weeks post\nco-house with naïve",
+                               group == "grp_5" ~ "Allo B6 2weeks\nnot-cohoused ctrls"),
+         treatment = factor(treatment,levels = c("Allo B6 2weeks\nnot-cohoused ctrls", "Allo B6 2weeks post\nco-house with naïve"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  write_csv("results/figure_data/B_long.csv")
+
+comp2_data %>% 
+  pivot_wider(names_from = O2_sensitivity, values_from = abund) %>% 
+  write_csv("results/figure_data/B_wide.csv")
+
+(comp_2_plot <- comp2_data %>% 
+  ggplot(aes(O2_sensitivity, abund, color = treatment)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  scale_color_manual(values = c("black","red")) +
+  labs(y = "Percent abundance", x = "Oxygen sensitivity", color = NULL) +
+  theme_bw()
+)
+ggsave("results/comparison_2.png" ,plot = comp_2_plot ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_2_plot_stats <- comp2_data %>% 
+  ggboxplot(x = "O2_sensitivity", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_2_stats.png" ,plot = comp_2_plot_stats ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_2_plot_stats_obligate <- comp2_data %>% 
+    ungroup() %>% 
+    group_by(group,treatment,sample) %>% 
+    mutate(O2_sensitivity =  as.character(O2_sensitivity),
+           O2_sensitivity = if_else(str_detect(O2_sensitivity, "Obligate"), "Obligate anaerobe", "Other")) %>% 
+    group_by(group,treatment,sample, O2_sensitivity) %>% 
+    summarise(abund = sum(abund)) %>%
+    write_csv("results/figure_data/B_long_obligates_vs_all.csv") %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = O2_sensitivity),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_2_stats_obligate.png" ,plot = comp_2_plot_stats_obligate ,scale = 3, width = 2, height = 2, dpi =600)
+
+comp2_genus_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2018",
+         group %in% c("grp_4", "grp_5")) %>%
+  mutate(treatment = case_when(group == "grp_4" ~ "Allo B6 2weeks post\nco-house with naïve",
+                               group == "grp_5" ~ "Allo B6 2weeks\nnot-cohoused ctrls"),
+         treatment = factor(treatment,levels = c("Allo B6 2weeks\nnot-cohoused ctrls", "Allo B6 2weeks post\nco-house with naïve"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group, Genus,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+(comp2_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>% 
+  ggplot(aes(treatment, abund, color = O2_sensitivity)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  facet_wrap(~Genus, scales = "free_y") +
+  labs(x = NULL, y = "Percent abundance", color = "Oxygen\nsensitivity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -25, vjust = 1, hjust = 0))
+) %>% ggsave(plot =., filename = "results/comparison_2_genus.png",width = 3, height =2.5, dpi = 600, scale = 3)
+
+(comp2_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter",facet.by = "Genus") +
+  stat_compare_means(aes(treatment, abund), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    facet_wrap(~Genus,scales = "free_y") +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+)  
+
+ggsave(filename = "results/comparison_2_genus_stats.pdf",width = 3, height =3, dpi = 600, scale = 3)
+
+
+comp2_data_BF <- combined_rel_abund_w_tax %>% 
+  left_join(metadata) %>% 
+  filter(year == "2018",
+         group %in% c("grp_4", "grp_5")) %>%
+  mutate(treatment = case_when(group == "grp_4" ~ "Allo B6 2weeks post\nco-house with naïve",
+                               group == "grp_5" ~ "Allo B6 2weeks\nnot-cohoused ctrls"),
+         treatment = factor(treatment,levels = c("Allo B6 2weeks\nnot-cohoused ctrls", "Allo B6 2weeks post\nco-house with naïve"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,Kingdom, Phylum) %>% 
+  mutate(Phylum = if_else(Phylum %in% c("Bacteroidetes", "Firmicutes"), Phylum, "other")) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+comp2_plot_BF <- comp2_data_BF %>% 
+  filter(Phylum != "other") %>% 
+ggboxplot(x = "Phylum", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+
+```
+### Lefse
+```{r}
+comp2_genus_data_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2018",
+         group %in% c("grp_4", "grp_5")) %>%
+  mutate(treatment = case_when(group == "grp_4" ~ "Allo B6 2weeks post\nco-house with naïve",
+                               group == "grp_5" ~ "Allo B6 2weeks\nnot-cohoused ctrls"),
+         treatment = factor(treatment,levels = c("Allo B6 2weeks\nnot-cohoused ctrls", "Allo B6 2weeks post\nco-house with naïve"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group, Genus,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100)
+
+comp2_pre_sumExp <- comp2_genus_data_lefse %>%
+  ungroup() %>% 
+  select(abund,Genus, sample) %>% 
+  pivot_wider(names_from = "sample", values_from = "abund",values_fill = 0) %>% 
+  column_to_rownames("Genus")
+
+exp_info2 <- comp2_genus_data %>% 
+  ungroup() %>% 
+  select(sample, treatment) %>% 
+  distinct() %>% 
+  column_to_rownames("sample") %>% 
+  mutate(GROUP = factor(treatment))
+
+comp2_sumExp <- SummarizedExperiment(comp2_pre_sumExp,colData = exp_info2)
+
+comp2_lefse <- lefser(comp2_sumExp,groupCol = "treatment",kruskal.threshold = 0.05,lda.threshold = 0)
+
+lefserPlot(comp2_lefse) + scale_fill_manual(values = c("forestgreen", "red"), name = NULL, labels = c("A", "B")) + theme_bw() + labs(x = NULL)
+```
+Export for external lefse
+```{r}
+comp2_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+ filter(year == "2018",
+         group %in% c("grp_4", "grp_5")) %>%
+  # mutate(treatment = case_when(group == "grp_4" ~ "Allo B6 2weeks post co-house with naïve",
+  #                              group == "grp_5" ~ "Allo B6 2weeks not-cohoused ctrls"),
+  #        treatment = factor(treatment,levels = c("Allo B6 2weeks not-cohoused ctrls", "Allo B6 2weeks post co-house with naïve"),ordered = TRUE)) %>% 
+  mutate(treatment = group,
+         treatment = factor(treatment,levels = c("grp_4","grp_5"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp2_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp2_ext_lefse2 <- comp2_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2018_59`)) %>% 
+  write_tsv("data/lefse/comp2_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp2_data.tsv  comp2_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp2_data.txt comp2_data.res -l 2
+
+lefse_plot_res.py comp2_data.res comp2_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp2_data.res comp2_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+## Comparison 3 (Fig. 4 in paper)
+
+Germ free mice gavaged with stool from either Syn or Allo BMT mice. Measured 2 weeks after stool gavage.
+```{r}
+
+comp3_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2019",
+         group %in% c("SynstAllo", "AllostAllo")) %>%
+  mutate(treatment = case_when(group == "SynstAllo" ~ "SynstAllo",
+                               group == "AllostAllo" ~ "AllostAllo"),
+         treatment = factor(treatment,levels = c("SynstAllo", "AllostAllo"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  write_csv("results/figure_data/C_long.csv")
+
+comp3_data %>% 
+  pivot_wider(names_from = O2_sensitivity, values_from = abund) %>% 
+  write_csv("results/figure_data/C_wide.csv")
+
+(comp_3_plot <- comp3_data %>% 
+  ggplot(aes(O2_sensitivity, abund, color = treatment)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  scale_color_manual(values = c("black","red")) +
+  labs(y = "Percent abundance", x = "Oxygen sensitivity", color = NULL) +
+  theme_bw()
+)
+ggsave("results/comparison_3.png" ,plot = comp_3_plot ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_3_plot_stats <- comp3_data %>% 
+  ggboxplot(x = "O2_sensitivity", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_3_stats.png" ,plot = comp_3_plot_stats ,scale = 3, width = 2, height = 2, dpi =600)
+
+(comp_3_plot_stats_obligate <- comp3_data %>% 
+    ungroup() %>% 
+    group_by(group,treatment,sample) %>% 
+    mutate(O2_sensitivity =  as.character(O2_sensitivity),
+           O2_sensitivity = if_else(str_detect(O2_sensitivity, "Obligate"), "Obligate anaerobe", "Other")) %>% 
+    group_by(group,treatment,sample, O2_sensitivity) %>% 
+    summarise(abund = sum(abund)) %>%
+    write_csv("results/figure_data/C_long_obligates_vs_all.csv") %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = O2_sensitivity),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_3_stats_obligate.png" ,plot = comp_3_plot_stats_obligate ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+comp3_genus_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2019",
+         group %in% c("SynstAllo", "AllostAllo")) %>%
+  mutate(treatment = case_when(group == "SynstAllo" ~ "SynstAllo",
+                               group == "AllostAllo" ~ "AllostAllo"),
+         treatment = factor(treatment,levels = c("SynstAllo", "AllostAllo"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Genus) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+(comp3_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>% 
+  ggplot(aes(treatment, abund, color = O2_sensitivity)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  facet_wrap(~Genus, scales = "free_y") +
+  labs(x = NULL, y = "Percent abundance", color = "Oxygen\nsensitivity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -25, vjust = 1, hjust = 0))
+) %>% ggsave(plot =., filename = "results/comparison_3_genus.png",width = 3, height =2.5, dpi = 600, scale = 3)
+
+
+(comp3_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter",facet.by = "Genus") +
+  stat_compare_means(aes(treatment, abund), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    facet_wrap(~Genus,scales = "free_y") +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+)  
+
+ggsave(filename = "results/comparison_3_genus_stats.pdf",width = 3, height =3, dpi = 600, scale = 3)
+
+
+comp3_data_BF <- combined_rel_abund_w_tax %>% 
+  left_join(metadata) %>% 
+  filter(year == "2019",
+         group %in% c("SynstAllo", "AllostAllo")) %>%
+  mutate(treatment = case_when(group == "SynstAllo" ~ "SynstAllo",
+                               group == "AllostAllo" ~ "AllostAllo"),
+         treatment = factor(treatment,levels = c("SynstAllo", "AllostAllo"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,Kingdom, Phylum) %>% 
+  mutate(Phylum = if_else(Phylum %in% c("Bacteroidetes", "Firmicutes"), Phylum, "other")) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+comp3_plot_BF <- comp3_data_BF %>% 
+  filter(Phylum != "other") %>% 
+ggboxplot(x = "Phylum", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+
+```
+
+### Lefse
+```{r}
+comp3_genus_data_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2019",
+         group %in% c("SynstAllo", "AllostAllo")) %>%
+  mutate(treatment = case_when(group == "SynstAllo" ~ "SynstAllo",
+                               group == "AllostAllo" ~ "AllostAllo"),
+         treatment = factor(treatment,levels = c("SynstAllo", "AllostAllo"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Genus) %>% 
+  summarise(abund = sum(abund)*100)
+
+comp3_pre_sumExp <- comp3_genus_data_lefse %>%
+  ungroup() %>% 
+  select(abund,Genus, sample) %>% 
+  pivot_wider(names_from = "sample", values_from = "abund",values_fill = 0) %>% 
+  column_to_rownames("Genus")
+
+exp_info3 <- comp3_genus_data %>% 
+  ungroup() %>% 
+  select(sample, treatment) %>% 
+  distinct() %>% 
+  column_to_rownames("sample") %>% 
+  mutate(GROUP = factor(treatment))
+
+comp3_sumExp <- SummarizedExperiment(comp3_pre_sumExp,colData = exp_info3)
+  
+comp3_lefse <- lefser(comp3_sumExp,groupCol = "treatment",kruskal.threshold = 0.05,lda.threshold = 0)
+
+lefserPlot(comp3_lefse) + scale_fill_manual(values = c("forestgreen", "red"), name = NULL, labels = c("A", "B")) + theme_bw() + labs(x = NULL)
+```
+Export for external lefse
+```{r}
+comp3_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2019",
+         group %in% c("SynstAllo", "AllostAllo")) %>%
+  mutate(treatment = case_when(group == "SynstAllo" ~ "SynstAllo",
+                               group == "AllostAllo" ~ "AllostAllo"),
+         treatment = factor(treatment,levels = c("SynstAllo", "AllostAllo"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp3_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp3_ext_lefse2 <- comp3_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  arrange(desc(`2019_92`)) %>% 
+  write_tsv("data/lefse/comp3_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp3_data.tsv  comp3_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp3_data.txt comp3_data.res -l 2
+
+lefse_plot_res.py comp3_data.res comp3_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp3_data.res comp3_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+
+## Comparison 4
+```{r}
+
+comp4_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2019",
+         group %in% c("SPFSyn", "SPFAllo")) %>%
+  mutate(treatment = case_when(group == "SPFSyn" ~ "SPFSyn",
+                               group == "SPFAllo" ~ "SPFAllo"),
+         treatment = factor(treatment,levels = c("SPFSyn", "SPFAllo"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  write_csv("results/figure_data/D_long.csv")
+
+comp4_data %>% 
+  pivot_wider(names_from = O2_sensitivity, values_from = abund) %>% 
+  write_csv("results/figure_data/D_wide.csv")
+
+(comp_4_plot <- comp4_data %>% 
+  ggplot(aes(O2_sensitivity, abund, color = treatment)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  scale_color_manual(values = c("black","red")) +
+  labs(y = "Percent abundance", x = "Oxygen sensitivity", color = NULL) +
+  theme_bw()
+)
+ggsave("results/comparison_4.png" ,plot = comp_4_plot ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_4_plot_stats <- comp4_data %>% 
+  ggboxplot(x = "O2_sensitivity", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_4_stats.png" ,plot = comp_4_plot_stats ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_4_plot_stats_obligate <- comp4_data %>% 
+    ungroup() %>% 
+    group_by(group,treatment,sample) %>% 
+    mutate(O2_sensitivity =  as.character(O2_sensitivity),
+           O2_sensitivity = if_else(str_detect(O2_sensitivity, "Obligate"), "Obligate anaerobe", "Other")) %>% 
+    group_by(group,treatment,sample, O2_sensitivity) %>% 
+    summarise(abund = sum(abund)) %>%
+        write_csv("results/figure_data/D_long_obligates_vs_all.csv") %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = O2_sensitivity),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_4_stats_obligate.png" ,plot = comp_4_plot_stats_obligate ,scale = 3, width = 2, height = 2, dpi =600)
+
+comp4_genus_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2019",
+         group %in% c("SPFSyn", "SPFAllo")) %>%
+  mutate(treatment = case_when(group == "SPFSyn" ~ "SPFSyn",
+                               group == "SPFAllo" ~ "SPFAllo"),
+         treatment = factor(treatment,levels = c("SPFSyn", "SPFAllo"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Genus) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+(comp4_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>% 
+  ggplot(aes(treatment, abund, color = O2_sensitivity)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  facet_wrap(~Genus, scales = "free_y") +
+  labs(x = NULL, y = "Percent abundance", color = "Oxygen\nsensitivity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -25, vjust = 1, hjust = 0))
+) %>% ggsave(plot =., filename = "results/comparison_4_genus.png",width = 3, height =2.5, dpi = 600, scale = 3)
+
+
+(comp4_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter",facet.by = "Genus") +
+  stat_compare_means(aes(treatment, abund), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    facet_wrap(~Genus,scales = "free_y") +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+)  
+
+ggsave(filename = "results/comparison_4_genus_stats.pdf",width = 3, height =3, dpi = 600, scale = 3)
+
+
+comp4_data_BF <- combined_rel_abund_w_tax %>% 
+  left_join(metadata) %>% 
+  filter(year == "2019",
+         group %in% c("SPFSyn", "SPFAllo")) %>%
+  mutate(treatment = case_when(group == "SPFSyn" ~ "SPFSyn",
+                               group == "SPFAllo" ~ "SPFAllo"),
+         treatment = factor(treatment,levels = c("SPFSyn", "SPFAllo"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,Kingdom, Phylum) %>% 
+  mutate(Phylum = if_else(Phylum %in% c("Bacteroidetes", "Firmicutes"), Phylum, "other")) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+comp4_plot_BF <- comp4_data_BF %>% 
+  filter(Phylum != "other") %>% 
+ggboxplot(x = "Phylum", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+
+```
+
+
+## Comparison 5
+Co-housing of naive with allo (expect naive to be more similar to allo)
+```{r}
+comp5_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2018",
+         group %in% c("grp_2", "grp_6")) %>%
+  mutate(treatment = case_when(group == "grp_2" ~ "B6 2 weeks post allo-BMT",
+                               group == "grp_6" ~ "Naive B6 6weeks post\nco-house with B6 allo BMT"),
+         treatment = factor(treatment,levels = c("B6 2 weeks post allo-BMT", "Naive B6 6weeks post\nco-house with B6 allo BMT"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  write_csv("results/figure_data/E_long.csv")
+
+comp5_data %>% 
+  pivot_wider(names_from = O2_sensitivity, values_from = abund) %>% 
+  write_csv("results/figure_data/E_wide.csv")
+
+(comp_5_plot <- comp5_data %>% 
+  ggplot(aes(O2_sensitivity, abund, color = treatment)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  scale_color_manual(values = c("black","red")) +
+  labs(y = "Percent abundance", x = "Oxygen sensitivity", color = NULL) +
+  theme_bw()
+)
+ggsave("results/comparison_5.png" ,plot = comp_5_plot ,scale = 3, width = 2, height = 2, dpi =600)
+
+(comp_5_plot_stats <- comp5_data %>% 
+  ggboxplot(x = "O2_sensitivity", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_5_stats.png" ,plot = comp_5_plot_stats ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_5_plot_stats_obligate <- comp5_data %>% 
+    ungroup() %>% 
+    group_by(group,treatment,sample) %>% 
+    mutate(O2_sensitivity =  as.character(O2_sensitivity),
+           O2_sensitivity = if_else(str_detect(O2_sensitivity, "Obligate"), "Obligate anaerobe", "Other")) %>% 
+    group_by(group,treatment,sample, O2_sensitivity) %>% 
+    summarise(abund = sum(abund)) %>%
+    write_csv("results/figure_data/E_long_obligates_vs_all.csv") %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = O2_sensitivity),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_5_stats_obligate.png" ,plot = comp_5_plot_stats_obligate ,scale = 3, width = 2, height = 2, dpi =600)
+
+comp5_genus_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2018",
+         group %in% c("grp_2", "grp_6")) %>%
+  mutate(treatment = case_when(group == "grp_2" ~ "B6 2 weeks post allo-BMT",
+                               group == "grp_6" ~ "Naive B6 6weeks post\nco-house with B6 allo BMT"),
+         treatment = factor(treatment,levels = c("B6 2 weeks post allo-BMT", "Naive B6 6weeks post\nco-house with B6 allo BMT"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Genus)
+
+
+(comp5_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>% 
+  ggplot(aes(treatment, abund, color = O2_sensitivity)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  facet_wrap(~Genus, scales = "free_y") +
+  labs(x = NULL, y = "Percent abundance", color = "Oxygen\nsensitivity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -25, vjust = 1, hjust = 0))
+) %>% ggsave(plot =., filename = "results/comparison_5_genus.png",width = 3, height =2.5, dpi = 600, scale = 3)
+
+(comp5_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter",facet.by = "Genus") +
+  stat_compare_means(aes(treatment, abund), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    facet_wrap(~Genus,scales = "free_y") +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+)  
+
+ggsave(filename = "results/comparison_5_genus_stats.pdf",width = 3, height =3, dpi = 600, scale = 3)
+
+comp5_data_BF <- combined_rel_abund_w_tax %>% 
+  left_join(metadata) %>% 
+  filter(year == "2018",
+         group %in% c("grp_2", "grp_6")) %>%
+  mutate(treatment = case_when(group == "grp_2" ~ "B6 2 weeks post allo-BMT",
+                               group == "grp_6" ~ "Naive B6 6weeks post\nco-house with B6 allo BMT"),
+         treatment = factor(treatment,levels = c("B6 2 weeks post allo-BMT", "Naive B6 6weeks post\nco-house with B6 allo BMT"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,Kingdom, Phylum) %>% 
+  mutate(Phylum = if_else(Phylum %in% c("Bacteroidetes", "Firmicutes"), Phylum, "other")) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+comp5_plot_BF <- comp5_data_BF %>% 
+  filter(Phylum != "other") %>% 
+ggboxplot(x = "Phylum", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+
+```
+
+## Comparison 6
+Co-housing of allo with naive (expect naive to be more similar to allo)
+```{r}
+comp6_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2018",
+         group %in% c("grp_1", "grp_4")) %>%
+  mutate(treatment = case_when(group == "grp_1" ~ "B6",
+                               group == "grp_4" ~ "Allo B6 2weeks post\nco-house with naïve"),
+         treatment = factor(treatment,levels = c("B6", "Allo B6 2weeks post\nco-house with naïve"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  write_csv("results/figure_data/F_long.csv")
+
+comp6_data %>% 
+  pivot_wider(names_from = O2_sensitivity, values_from = abund) %>% 
+  write_csv("results/figure_data/F_wide.csv")
+
+(comp_6_plot <- comp6_data %>% 
+  ggplot(aes(O2_sensitivity, abund, color = treatment)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  scale_color_manual(values = c("black","red")) +
+  labs(y = "Percent abundance", x = "Oxygen sensitivity", color = NULL) +
+  theme_bw()
+)
+ggsave("results/comparison_5.png" ,plot = comp_6_plot ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_6_plot_stats <- comp6_data %>% 
+  ggboxplot(x = "O2_sensitivity", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_6_stats.png" ,plot = comp_6_plot_stats ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_6_plot_stats_obligate <- comp6_data %>% 
+    ungroup() %>% 
+    group_by(group,treatment,sample) %>% 
+    mutate(O2_sensitivity =  as.character(O2_sensitivity),
+           O2_sensitivity = if_else(str_detect(O2_sensitivity, "Obligate"), "Obligate anaerobe", "Other")) %>% 
+    group_by(group,treatment,sample, O2_sensitivity) %>% 
+    summarise(abund = sum(abund)) %>%
+    write_csv("results/figure_data/F_long_obligates_vs_all.csv") %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = O2_sensitivity),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_6_stats_obligate.png" ,plot = comp_6_plot_stats_obligate ,scale = 3, width = 2, height = 2, dpi =600)
+
+comp6_genus_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2018",
+         group %in% c("grp_1", "grp_4")) %>%
+  mutate(treatment = case_when(group == "grp_1" ~ "B6",
+                               group == "grp_4" ~ "Allo B6 2weeks post\nco-house with naïve"),
+         treatment = factor(treatment,levels = c("B6", "Allo B6 2weeks post\nco-house with naïve"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity,Genus)
+
+
+(comp6_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>% 
+  ggplot(aes(treatment, abund, color = O2_sensitivity)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  facet_wrap(~Genus, scales = "free_y") +
+  labs(x = NULL, y = "Percent abundance", color = "Oxygen\nsensitivity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -25, vjust = 1, hjust = 0))
+) %>% ggsave(plot =., filename = "results/comparison_6_genus.png",width = 3, height =2.5, dpi = 600, scale = 3)
+
+
+(comp6_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter",facet.by = "Genus") +
+  stat_compare_means(aes(treatment, abund), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    facet_wrap(~Genus,scales = "free_y") +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+)  
+
+ggsave(filename = "results/comparison_6_genus_stats.pdf",width = 3, height =3, dpi = 600, scale = 3)
+
+
+comp6_data_BF <- combined_rel_abund_w_tax %>% 
+  left_join(metadata) %>% 
+  filter(year == "2018",
+         group %in% c("grp_1", "grp_4")) %>%
+  mutate(treatment = case_when(group == "grp_1" ~ "B6",
+                               group == "grp_4" ~ "Allo B6 2weeks post\nco-house with naïve"),
+         treatment = factor(treatment,levels = c("B6", "Allo B6 2weeks post\nco-house with naïve"),ordered = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,Kingdom, Phylum) %>% 
+  mutate(Phylum = if_else(Phylum %in% c("Bacteroidetes", "Firmicutes"), Phylum, "other")) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+comp6_plot_BF <- comp6_data_BF %>% 
+  filter(Phylum != "other") %>% 
+ggboxplot(x = "Phylum", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+
+```
+
+## Comparison 7 (Fig. 7 in the paper)
+Fe-chelation: more obligate anaerobes and diversity expected compared to diluent allos
+```{r}
+comp7_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2019",
+         group %in% c("DefADef", "DefAVehicle")) %>%
+  mutate(treatment = case_when(group == "DefADef" ~ "Fe chelation",
+                               group == "DefAVehicle" ~ "diluent allos")) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  write_csv("results/figure_data/G_long.csv")
+
+comp7_data %>% 
+  pivot_wider(names_from = O2_sensitivity, values_from = abund) %>% 
+  write_csv("results/figure_data/G_wide.csv")
+
+(comp_7_plot <- comp7_data %>% 
+  ggplot(aes(O2_sensitivity, abund, color = treatment)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  scale_color_manual(values = c("black","red")) +
+  labs(y = "Percent abundance", x = "Oxygen sensitivity", color = NULL) +
+  theme_bw()
+)
+ggsave("results/comparison_7.png" ,plot = comp_7_plot ,scale = 3, width = 2, height = 2, dpi =600)
+
+(comp_7_plot_stats <- comp7_data %>% 
+  ggboxplot(x = "O2_sensitivity", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_7_stats.png" ,plot = comp_7_plot_stats ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_7_plot_stats_obligate <- comp7_data %>% 
+    ungroup() %>% 
+    group_by(group,treatment,sample) %>% 
+    mutate(O2_sensitivity =  as.character(O2_sensitivity),
+           O2_sensitivity = if_else(str_detect(O2_sensitivity, "Obligate"), "Obligate anaerobe", "Other")) %>% 
+    group_by(group,treatment,sample, O2_sensitivity) %>% 
+    summarise(abund = sum(abund)) %>%
+    write_csv("results/figure_data/G_long_obligates_vs_all.csv") %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = O2_sensitivity),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_7_stats_obligate.png" ,plot = comp_7_plot_stats_obligate ,scale = 3, width = 2, height = 2, dpi =600)
+
+comp7_genus_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2019",
+         group %in% c("DefADef", "DefAVehicle")) %>%
+  mutate(treatment = case_when(group == "DefADef" ~ "Fe chelation",
+                               group == "DefAVehicle" ~ "diluent allos")) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Genus) %>% 
+  summarise(abund = sum(abund)*100)
+
+(comp7_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>% 
+  ggplot(aes(treatment, abund, color = O2_sensitivity)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  facet_wrap(~Genus, scales = "free_y") +
+  labs(x = NULL, y = "Percent abundance", color = "Oxygen\nsensitivity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -25, vjust = 1, hjust = 0))
+) %>% ggsave(plot =., filename = "results/comparison_7_genus.png",width = 3, height =2.5, dpi = 600, scale = 3)
+
+(comp7_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter",facet.by = "Genus") +
+  stat_compare_means(aes(treatment, abund), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    facet_wrap(~Genus,scales = "free_y") +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+)  
+
+ggsave(filename = "results/comparison_7_genus_stats.pdf",width = 3, height =3, dpi = 600, scale = 3)
+
+
+comp7_data_BF <- combined_rel_abund_w_tax %>% 
+  left_join(metadata) %>% 
+  filter(year == "2019",
+         group %in% c("DefADef", "DefAVehicle")) %>%
+  mutate(treatment = case_when(group == "DefADef" ~ "Fe chelation",
+                               group == "DefAVehicle" ~ "diluent allos")) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,Kingdom, Phylum) %>% 
+  mutate(Phylum = if_else(Phylum %in% c("Bacteroidetes", "Firmicutes"), Phylum, "other")) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+comp7_plot_BF <- comp7_data_BF %>% 
+  filter(Phylum != "other") %>% 
+ggboxplot(x = "Phylum", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+
+```
+### Lefse
+
+*No significant taxonomic differences*
+```{r}
+comp7_genus_data_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2019",
+         group %in% c("DefADef", "DefAVehicle")) %>%
+  mutate(treatment = case_when(group == "DefADef" ~ "Fe chelation",
+                               group == "DefAVehicle" ~ "diluent allos")) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Genus) %>% 
+  summarise(abund = sum(abund)*100)
+
+comp7_pre_sumExp <- comp7_genus_data %>%
+  ungroup() %>% 
+  select(abund,Genus, sample) %>% 
+  pivot_wider(names_from = "sample", values_from = "abund",values_fill = 0) %>% 
+  column_to_rownames("Genus")
+
+exp_info7 <- comp7_genus_data %>% 
+  ungroup() %>% 
+  select(sample, treatment) %>% 
+  distinct() %>% 
+  column_to_rownames("sample") %>% 
+  mutate(GROUP = factor(treatment))
+
+comp7_sumExp <- SummarizedExperiment(comp7_pre_sumExp,colData = exp_info7)
+  
+
+comp7_lefse <- lefser(comp7_sumExp,groupCol = "treatment",kruskal.threshold = 0.05,lda.threshold = 0)
+
+lefserPlot(comp7_lefse) + scale_fill_manual(values = c("forestgreen", "red"), name = NULL, labels = c("A", "B")) + theme_bw() + labs(x = NULL)
+```
+
+
+Export for external lefse
+```{r}
+comp7_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+ filter(year == "2019",
+         group %in% c("DefADef", "DefAVehicle")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp7_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp7_ext_lefse2 <- comp7_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2019_100`)) %>% 
+  write_tsv("data/lefse/comp7_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp7_data.tsv  comp7_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp7_data.txt comp7_data.res -l 2
+
+lefse_plot_res.py comp7_data.res comp7_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp7_data.res comp7_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+Modified comparison 7 with combined diluent allos and the standard allos 2 weeks post allo BMT (from comparison 1)
+
+```{r}
+
+allo_2weeks_post_BMT_obligates <- comp1_data %>% 
+    ungroup() %>% 
+    group_by(group,treatment,sample) %>% 
+    mutate(O2_sensitivity =  as.character(O2_sensitivity),
+           O2_sensitivity = if_else(str_detect(O2_sensitivity, "Obligate"), "Obligate anaerobe", "Other")) %>% 
+    group_by(group,treatment,sample, O2_sensitivity) %>% 
+    summarise(abund = sum(abund)) %>% 
+  filter(as.character(treatment) == "2 weeks post allo-BMT") %>% 
+  mutate(treatment = "2 week post-allo BMT\nwith diluent or no treatment")
+
+comp_7B_data_stats_obligate <- comp7_data %>% 
+    ungroup() %>% 
+    group_by(group,treatment,sample) %>% 
+    mutate(O2_sensitivity =  as.character(O2_sensitivity),
+           O2_sensitivity = if_else(str_detect(O2_sensitivity, "Obligate"), "Obligate anaerobe", "Other"),
+           treatment =if_else(treatment == "diluent allos", "2 week post-allo BMT\nwith diluent or no treatment", treatment)) %>% 
+    group_by(group,treatment,sample, O2_sensitivity) %>% 
+    summarise(abund = sum(abund)) %>% 
+  bind_rows(allo_2weeks_post_BMT_obligates) %>% 
+  write_csv("results/figure_data/G2_long_obligates_vs_all.csv")
+
+(comp_7B_plot_stats_obligate <- comp_7B_data_stats_obligate %>% 
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = O2_sensitivity),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_7B_stats_obligate.png" ,plot = comp_7B_plot_stats_obligate ,scale = 3, width = 2, height = 2, dpi =600)
+```
+
+
+```{r}
+
+comparisons <- metadata %>% 
+  filter(group %in% c("DefADef", "DefAVehicle", "grp_1", "grp_2")) %>%
+  mutate(treatment = group,
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+#ggsave("data/lefse/for_resubmission/Charles_River_abund.pdf", scale = 4, width = 2, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "OTU"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  #ggsave("data/lefse/for_resubmission/Charles_River_PCoA.pdf", width = 3, height = 2, scale = 2)
+```
+
+
+
+## Comparison 8 (Fig. 4 in the paper)
+GF mice gavaged with stool from Syn B6 or Allo B6
+```{r}
+comp8_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2019",
+         group %in% c("Synstrecip", "Allostrecip")) %>%
+  mutate(treatment = case_when(group == "Synstrecip" ~ "GF gavaged with Syn B6 stool",
+                               group == "Allostrecip" ~ "GF gavaged with Allo B6 stool")) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  write_csv("results/figure_data/H_long.csv")
+
+comp8_data %>% 
+  pivot_wider(names_from = O2_sensitivity, values_from = abund) %>% 
+  write_csv("results/figure_data/H_wide.csv")
+
+(comp_8_plot <- comp8_data %>% 
+  ggplot(aes(O2_sensitivity, abund, color = treatment)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2)) +
+  scale_color_manual(values = c("black","red")) +
+  labs(y = "Percent abundance", x = "Oxygen sensitivity", color = NULL) +
+  theme_bw()
+)
+ggsave("results/comparison_8.png" ,plot = comp_8_plot ,scale = 3, width = 2, height = 2, dpi =600)
+
+(comp_8_plot_stats <- comp8_data %>% 
+  ggboxplot(x = "O2_sensitivity", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_8_stats.png" ,plot = comp_8_plot_stats ,scale = 3, width = 2, height = 2, dpi =600)
+
+
+(comp_8_plot_stats_obligate <- comp8_data %>% 
+    ungroup() %>% 
+    group_by(group,treatment,sample) %>% 
+    mutate(O2_sensitivity =  as.character(O2_sensitivity),
+           O2_sensitivity = if_else(str_detect(O2_sensitivity, "Obligate"), "Obligate anaerobe", "Other")) %>% 
+    group_by(group,treatment,sample, O2_sensitivity) %>% 
+    summarise(abund = sum(abund)) %>%
+    write_csv("results/figure_data/G_long_obligates_vs_all.csv") %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = O2_sensitivity),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL)
+)
+ggsave("results/comparison_8_stats_obligate.png" ,plot = comp_8_plot_stats_obligate ,scale = 3, width = 2, height = 2, dpi =600)
+
+comp8_genus_data <- rel_abund_w_O2_sens %>% 
+  filter(year == "2019",
+         group %in% c("DefADef", "DefAVehicle")) %>%
+  mutate(treatment = case_when(group == "DefADef" ~ "Fe chelation",
+                               group == "DefAVehicle" ~ "diluent allos")) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Genus) %>% 
+  summarise(abund = sum(abund)*100)
+
+(comp8_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>% 
+  ggplot(aes(treatment, abund, color = O2_sensitivity)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  facet_wrap(~Genus, scales = "free_y") +
+  labs(x = NULL, y = "Percent abundance", color = "Oxygen\nsensitivity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -25, vjust = 1, hjust = 0))
+) %>% ggsave(plot =., filename = "results/comparison_8_genus.png",width = 3, height =2.5, dpi = 600, scale = 3)
+
+(comp8_genus_data %>% 
+  mutate(Genus = if_else(O2_sensitivity =="unknown", "other", Genus)) %>%
+  ggboxplot(x = "treatment", y = "abund",
+          color = "O2_sensitivity", palette = "jco",
+          add = "jitter",facet.by = "Genus") +
+  stat_compare_means(aes(treatment, abund), method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    facet_wrap(~Genus,scales = "free_y") +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+)  
+
+ggsave(filename = "results/comparison_8_genus_stats.pdf",width = 3, height =3, dpi = 600, scale = 3)
+
+
+comp8_data_BF <- combined_rel_abund_w_tax %>% 
+  left_join(metadata) %>% 
+  filter(year == "2019",
+         group %in% c("Synstrecip", "Allostrecip")) %>%
+  mutate(treatment = case_when(group == "Synstrecip" ~ "GF gavaged with Syn B6 stool",
+                               group == "Allostrecip" ~ "GF gavaged with Allo B6 stool")) %>% 
+  ungroup() %>%
+  group_by(sample,group,treatment,Kingdom, Phylum) %>% 
+  mutate(Phylum = if_else(Phylum %in% c("Bacteroidetes", "Firmicutes"), Phylum, "other")) %>% 
+  summarise(abund = sum(abund)*100)
+
+
+comp8_plot_BF <- comp8_data_BF %>% 
+  filter(Phylum != "other") %>% 
+ggboxplot(x = "Phylum", y = "abund",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(aes(group = treatment),method = "wilcox") +
+    labs(x = NULL, y = "Percent abundance", color = NULL) +
+    theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust = 1))
+
+```
+### Lefse
+
+*No significant taxonomic differences*
+```{r}
+comp8_genus_data_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2019",
+         group %in% c("Synstrecip", "Allostrecip")) %>%
+  mutate(treatment = case_when(group == "Synstrecip" ~ "GF gavaged with Syn B6 stool",
+                               group == "Allostrecip" ~ "GF gavaged with Allo B6 stool")) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Genus) %>% 
+  summarise(abund = sum(abund)*100)
+
+comp8_pre_sumExp <- comp8_genus_data %>%
+  ungroup() %>% 
+  select(abund,Genus, sample) %>% 
+  pivot_wider(names_from = "sample", values_from = "abund",values_fill = 0) %>% 
+  column_to_rownames("Genus")
+
+exp_info8 <- comp8_genus_data %>% 
+  ungroup() %>% 
+  select(sample, treatment) %>% 
+  distinct() %>% 
+  column_to_rownames("sample") %>% 
+  mutate(GROUP = factor(treatment))
+
+comp8_sumExp <- SummarizedExperiment(comp8_pre_sumExp,colData = exp_info8)
+  
+
+comp8_lefse <- lefser(comp8_sumExp,groupCol = "treatment",kruskal.threshold = 0.05,lda.threshold = 0)
+
+lefserPlot(comp8_lefse) + scale_fill_manual(values = c("forestgreen", "red"), name = NULL, labels = c("A", "B")) + theme_bw() + labs(x = NULL)
+```
+
+
+Export for external lefse
+```{r}
+comp8_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2019",
+         group %in% c("Synstrecip", "Allostrecip")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp8_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp8_ext_lefse2 <- comp8_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2019_63`)) %>% 
+  write_tsv("data/lefse/comp8_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp8_data.tsv  comp8_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp8_data.txt comp8_data.res -l 2
+
+lefse_plot_res.py comp8_data.res comp8_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp8_data.res comp8_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+## Comparison 9 (Fig. S1 [top] in the paper)
+
+Export for external lefse
+```{r}
+comp9_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2018",
+         group %in% c("grp_2", "grp_3", "grp_6")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp9_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp9_ext_lefse2 <- comp9_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2018_47`)) %>% 
+  write_tsv("data/lefse/comp9_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp9_data.tsv  comp9_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp9_data.txt comp9_data.res -l 2
+
+lefse_plot_res.py comp9_data.res comp9_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp9_data.res comp9_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+## Comparison 10 (Fig. S1 [middle] in the paper)
+
+Export for external lefse
+```{r}
+comp10_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2018",
+         group %in% c("grp_1", "grp_10")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp10_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp10_ext_lefse2 <- comp10_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2018_40`)) %>% 
+  write_tsv("data/lefse/comp10_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp10_data.tsv  comp10_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp10_data.txt comp10_data.res -l 2
+
+lefse_plot_res.py comp10_data.res comp10_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp10_data.res comp10_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+## Comparison 11 (Fig. S1 [bottom] in the paper)
+
+Export for external lefse
+```{r}
+comp11_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2018",
+         group %in% c("grp_2", "grp_11", "grp_12")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp11_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp11_ext_lefse2 <- comp11_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2018_47`)) %>% 
+  write_tsv("data/lefse/comp11_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp11_data.tsv  comp11_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp11_data.txt comp11_data.res -l 2
+
+lefse_plot_res.py comp11_data.res comp11_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp11_data.res comp11_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+## Comparison 11b (Fig. S1 [bottom] in the paper)--additional controls
+
+Export for external lefse
+```{r}
+comp11b_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2018",
+         group %in% c("grp_2", "grp_11", "grp_12","grp_1","grp_10")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp11b_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp11b_ext_lefse2 <- comp11b_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2018_47`)) %>% 
+  write_tsv("data/lefse/comp11b_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp11b_data.tsv  comp11b_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp11b_data.txt comp11b_data.res -l 2
+
+lefse_plot_res.py comp11b_data.res comp11b_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp11b_data.res comp11b_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+## Comparison 12 (Fig. S3 in the paper)
+
+Export for external lefse
+```{r}
+comp12_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2019",
+         group %in% c("SynstAllo", "AllostAllo")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp12_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp12_ext_lefse2 <- comp12_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2019_92`)) %>% 
+  write_tsv("data/lefse/comp12_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp12_data.tsv  comp12_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp12_data.txt comp12_data.res -l 2
+
+lefse_plot_res.py comp12_data.res comp12_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp12_data.res comp12_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+## Comparison 13 (reviewer point #12)
+Syngeneic compared to allo and naive
+
+Export for external lefse
+```{r}
+comp13_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(group %in% c("grp_2", "grp_1", "DonorSyn", "SPFSyn")) %>%
+  mutate(group = if_else(group %in% c("DonorSyn", "SPFSyn"), "Syngeneic", group),
+         treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- comp13_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+comp13_ext_lefse2 <- comp13_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2019_60`)) %>% 
+  write_tsv("data/lefse/comp13_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py comp13_data.tsv  comp13_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py comp13_data.txt comp13_data.res -l 2
+
+lefse_plot_res.py comp13_data.res comp13_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py comp13_data.res comp13_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+
+## Combined plots
+```{r}
+
+(combined_plot <- comp_1_plot_stats + 
+  comp_2_plot_stats + 
+  comp_3_plot_stats + 
+  comp_4_plot_stats +
+  comp_5_plot_stats +
+  comp_6_plot_stats +
+  comp_7_plot_stats +
+  plot_annotation(tag_levels = "A",tag_suffix = ")") + 
+  plot_layout(ncol = 3)
+)
+
+ggsave("results/combined_stats_plots.png", plot = combined_plot ,width = 3.75, height = 2.5, dpi = 600, scale = 4.5)
+
+
+(combined_plot_BF <- comp1_plot_BF + 
+  comp2_plot_BF + 
+  comp3_plot_BF + 
+  comp4_plot_BF +
+  comp5_plot_BF +
+  comp6_plot_BF +
+  comp7_plot_BF +
+  plot_annotation(tag_levels = "A",tag_suffix = ")") + 
+  plot_layout(ncol = 3)
+)
+
+ggsave("results/Bacteroidetes_Firmicutes_combined_stats_plots.png", plot = combined_plot_BF ,width = 3.75, height = 2.5, dpi = 600, scale = 4.5)
+
+
+(combined_plot_obligates <- comp_1_plot_stats_obligate + 
+  comp_2_plot_stats_obligate + 
+  comp_3_plot_stats_obligate + 
+  comp_4_plot_stats_obligate +
+  comp_5_plot_stats_obligate +
+  comp_6_plot_stats_obligate +
+  comp_7_plot_stats_obligate +
+  plot_annotation(tag_levels = "A",tag_suffix = ")") + 
+  plot_layout(ncol = 3)
+)
+
+ggsave("results/obligate_anerobes_vs_others.png", plot = combined_plot_obligates ,width = 3.75, height = 2.5, dpi = 600, scale = 4.5)
+
+```
+
+
+
+
+O2 ratios
+```{r}
+O2_sens_ratio <- rel_abund_w_O2_sens %>% 
+  filter(year == "2018",
+         O2_sensitivity != "unknown") %>% 
+  ungroup() %>% 
+  group_by(sample,group,O2_sensitivity) %>% 
+  summarise(abund = sum(abund)) %>%  
+  pivot_wider(values_from = abund, names_from = O2_sensitivity) %>% 
+  mutate(anaerobes_to_facultative = `Obligate\nanaerobe` / `Facultative\nanaerobe`,
+         anaerobes_minus_facultative = `Obligate\nanaerobe` - `Facultative\nanaerobe`) %>% 
+  left_join(metadata)
+
+O2_sens_ratio %>% 
+  ggplot(aes(anaerobes_to_facultative, group, fill = `syn/allo`)) +
+  #geom_point()
+  geom_boxplot() +
+  labs(x = "more facultative anaerobes <-  -> more obligate anaerobes")
+
+O2_sens_ratio %>% 
+  filter(group %in% c("grp_1", "grp_2")) %>% 
+  ggplot(aes(anaerobes_to_facultative, group, fill = `syn/allo`)) +
+  #geom_point()
+  geom_boxplot() +
+  labs(x = "more facultative anaerobes <-  -> more obligate anaerobes")
+
+```
+
+
+
+# Beta diversity comparisons
+
+## SF1G
+
+```{r}
+
+#remotes::install_github("GuillemSalazar/EcolUtils")
+
+
+comparisons <- metadata %>% 
+  filter(group %in% c("grp_1", "grp_2", "grp_10", "grp_11", "grp_12")) %>% 
+  mutate(treatment = case_when(group == "grp_1" ~ "B6",
+                               group == "grp_2" ~ "Allo B6",
+                               group == "grp_10" ~ "B6 ab",
+                               group == "grp_11" ~ "B6 ab with allo stool [2w]",
+                               group == "grp_12" ~ "B6 ab with allo stool [6w]"),
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+dat_for_BC <- genus_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+
+BC <- vegan::vegdist(dat_for_BC) %>% 
+  as.matrix() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("s1") %>% 
+  pivot_longer(-s1,names_to = "s2", values_to = "dist") %>% 
+  filter(s1 != s2) %>% 
+  left_join(comparisons %>% rename_with( ~ paste0("s1_", .x)) %>% dplyr::rename(s1 ="s1_sample")) %>% 
+  left_join(comparisons %>% rename_with( ~ paste0("s2_", .x)) %>% dplyr::rename(s2 ="s2_sample") ) %>% 
+  filter(s1_treatment %in% c("B6", "Allo B6")) %>% 
+  mutate(sim = 1-dist)
+
+
+BC %>% ggplot(aes(factor(s2_treatment,levels = c("B6","Allo B6","B6 ab", "B6 ab with allo stool [2w]", "B6 ab with allo stool [6w]"),ordered = TRUE),sim, fill = s1_treatment)) +
+  geom_boxplot() +
+  geom_point(height = 0,width = 0.2,position = position_jitterdodge()) +
+  theme_bw() +
+  #facet_wrap(~s1_treatment) +
+  labs(x = NULL, y = "Similarity [1 - Bray-Curits dissimilarity]")
+
+BC_ratio <- BC %>% 
+  ungroup() %>%
+  group_by(s2,s2_treatment,s1_treatment) %>% 
+  summarise(mean = mean(sim)) %>% 
+  pivot_wider(names_from = s1_treatment, values_from = mean) %>% 
+  mutate(ratio = `Allo B6` / B6)
+
+BC_ratio %>% 
+  ggplot(aes(ratio, s2_treatment)) +
+  geom_boxplot() +
+  geom_vline(xintercept = 1) +
+  labs(x = "Similarity ratio [Allo / B6]")
+
+
+# Permanova 
+
+## B6 and Allo B6
+
+met <- comparisons %>% filter(treatment %in% c("B6", "Allo B6"))
+dat <- dat_for_BC[met$sample,]
+
+(perm_res <- vegan::adonis2(dat ~ treatment, met))
+
+
+## B6 and Allo B6
+
+met <- comparisons %>% filter(treatment %in% c("B6", "Allo B6"))
+dat <- dat_for_BC[met$sample,]
+
+(perm_res <- vegan::adonis2(dat ~ treatment, met))
+
+
+
+
+#method = "aitchison",pseudocount = min(dat_for_BC[dat_for_BC > 0 ]) / 10
+
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+perm_res <- EcolUtils::adonis.pair(BC_raw, factor(comparisons$treatment))
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_manual(values = c("cyan3","red","forestgreen","blue","darkorchid2")) +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/FigS1bottom_PCoA.pdf", width = 3, height = 2, scale = 2)
+```
+
+## SF1C
+
+```{r}
+
+#remotes::install_github("GuillemSalazar/EcolUtils")
+
+
+comparisons <- metadata %>% 
+  filter(group %in% c("grp_1", "grp_2", "grp_10", "grp_3", "grp_6")) %>% 
+  mutate(treatment = case_when(group == "grp_1" ~ "B6",
+                               group == "grp_2" ~ "Allo B6",
+                               group == "grp_10" ~ "B6 ab",
+                               group == "grp_3" ~ "B6 co-housed with allo B6 [2w]",
+                               group == "grp_6" ~ "B6 co-housed with allo B6 [6w]"),
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+dat_for_BC <- genus_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/FigS1top_PCoA.pdf", width = 3, height = 2, scale = 2)
+  
+
+# Test differences in distances based on claim in paper that B6 co-hosued with allo was more similar to allo after 6 weeks than 2 weeks.
+  
+bc_df <- BC_raw %>% 
+  as.matrix() %>% as.data.frame() %>% 
+  rownames_to_column("s1") %>% 
+  pivot_longer(-s1, names_to = "s2", values_to = "dist") %>% 
+  left_join(metadata %>% dplyr::rename_all(~paste0("s1_",.x)) %>% dplyr::rename(s1 = "s1_sample")) %>% 
+  left_join(metadata %>% dplyr::rename_all(~paste0("s2_",.x)) %>% dplyr::rename(s2 = "s2_sample")) %>% 
+  filter(s2_group == "grp_2",
+         s1_group %in% c("grp_3", "grp_6") ) 
+
+bc_df %>% 
+  ggplot(aes(s1_group, 1- dist)) +
+  geom_boxplot()
+
+bc_df_wide <- bc_df %>% 
+  pivot_wider(names_from = s1_group, values_from = dist)
+
+t.test(bc_df_wide$grp_3[!is.na(bc_df_wide$grp_3)], bc_df_wide$grp_6[!is.na(bc_df_wide$grp_6)] )
+
+wilcox.test(bc_df_wide$grp_3[!is.na(bc_df_wide$grp_3)], bc_df_wide$grp_6[!is.na(bc_df_wide$grp_6)] )
+  
+```
+
+## SF1C with B6 co-housed with allo B6 2w removed (11/8/2022 request)
+
+```{r}
+#remotes::install_github("GuillemSalazar/EcolUtils")
+
+comparisons <- metadata %>% 
+  filter(group %in% c("grp_1", "grp_2", "grp_10", "grp_6")) %>% 
+  mutate(treatment = case_when(group == "grp_1" ~ "B6",
+                               group == "grp_2" ~ "Allo B6",
+                               group == "grp_10" ~ "B6 ab",
+                               group == "grp_6" ~ "B6 co-housed with allo B6 [6w]"),
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+dat_for_BC <- genus_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/FigS1top_NOV2022mod_PCoA.pdf", width = 3, height = 2, scale = 2)
+```
+
+#### Export for external lefse
+```{r}
+FigS1top_NOV2022mod_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2018",
+         group %in% c("grp_1", "grp_2", "grp_10", "grp_6")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- FigS1top_NOV2022mod_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+FigS1top_NOV2022mod_ext_lefse2 <- FigS1top_NOV2022mod_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2018_40`)) %>% 
+  write_tsv("data/lefse/FigS1top_NOV2022mod_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py FigS1top_NOV2022mod_data.tsv  FigS1top_NOV2022mod_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py FigS1top_NOV2022mod_data.txt FigS1top_NOV2022mod_data.res -l 2
+
+lefse_plot_res.py FigS1top_NOV2022mod_data.res FigS1top_NOV2022mod_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py FigS1top_NOV2022mod_data.res FigS1top_NOV2022mod_cladogram.pdf --format pdf --dpi 600
+```
+
+
+# Additional requested figures
+
+## 2018 data
+
+Keisuke requested PCoA, Cladogram, LEfSe analysis for the the following groups:
+  - B6 base line pre BMT
+  - B6 2weeks post allo BMT + Allo B6 2weeks not-cohoused ctrls (combine two groups as same group) 
+  - Naïve B6 2weeks post co-house with B6 allo BMT
+  - Allo B6 2weeks post co-house with naïve
+
+```{r}
+
+#remotes::install_github("GuillemSalazar/EcolUtils")
+
+
+comparisons <- metadata %>% 
+  filter(group %in% c("grp_1", "grp_2", "grp_5", "grp_3", "grp_4")) %>% 
+  mutate(treatment = case_when(group == "grp_1" ~ "B6 pre-BMT",
+                               group == "grp_2" ~ "Allo B6",
+                               group == "grp_5" ~ "Allo B6",
+                               group == "grp_3" ~ "B6 co-housed with allo B6 [2w]",
+                               group == "grp_4" ~ "Allo B6 co-housed with naive B6 [2w]"),
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+dat_for_BC <- OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "OTU"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_manual(values = c("blue","red","pink","black")) +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/2018_additional_1_PCoA.pdf", width = 3, height = 2, scale = 2)
+```
+
+Export for external lefse
+```{r}
+addtl_1_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  mutate(group = str_replace(group,"grp_5", "grp_2")) %>% # merge the two Allo B6 2weeks groups
+  filter(year == "2018",
+         group %in% c("grp_1", "grp_2", "grp_3", "grp_4")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- addtl_1_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+addtl_1_ext_lefse2 <- addtl_1_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2018_40`)) %>% 
+  write_tsv("data/lefse/addtl_1_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py addtl_1_data.tsv  addtl_1_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py addtl_1_data.txt addtl_1_data.res -l 2
+
+lefse_plot_res.py addtl_1_data.res addtl_1_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py addtl_1_data.res addtl_1_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+## 2019 data
+
+
+### One
+Keisuke requested PCoA, Cladogram, inverse Simpson, & LEfSe analysis for the the following groups:
+  - Balbc->B6(Ab+Gav-) day21(13, 33, 34, 35) [addtl_1]
+  - Balbc->B6(Ab+Gav+) day21 (14, 15, 16, 36, 37) [addtl_2]
+  - Balbc->B6(Ab-Gav-) (normal allo ctrl) day21(17, 38, 39) [addtl_3]
+  - Control group (103, 109, 41, 23, 47) [DefNaive/naive/SPFnaive]
+  
+  
+```{r}
+
+#remotes::install_github("GuillemSalazar/EcolUtils")
+
+
+comparisons <- metadata %>% 
+  filter(group %in% c("addtl_1", "addtl_2", "addtl_3", "DefNaive/naive/SPFnaive")) %>% 
+  mutate(treatment = case_when(group == "addtl_1" ~ "Balbc -> B6(Ab+Gav-) day21",
+                               group == "addtl_2" ~ "Balbc -> B6(Ab+Gav+) day21",
+                               group == "addtl_3" ~ "Balbc -> B6(Ab-Gav-)",
+                               group == "DefNaive/naive/SPFnaive" ~ "Control"),
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+dat_for_BC <- OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "OTU"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/2019_additional_2_PCoA.pdf", width = 3, height = 2, scale = 2)
+
+# Inv Simpson diversity data
+  
+inv_simpson <- vegan::diversity(dat_for_BC, index = "invsimpson") %>% 
+  data.frame(inv_simpson = ., sample = names(.)) %>% 
+  left_join(comparisons) %>% 
+  write_tsv("data/lefse/for_resubmission/2019_additional_2_Simpson.tsv")
+
+inv_simpson %>% 
+  ggplot(aes(treatment, inv_simpson, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(y = "Inverse Simpson Index", x = NULL, fill = NULL) +
+  scale_fill_viridis_d(end = 0.75,option = "A") +
+  theme_bw() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        legend.direction = "vertical")
+ggsave("data/lefse/for_resubmission/2019_additional_2_Simpson.pdf", width = 1.25, height = 2, dpi = 300, scale =2)
+
+my_comparisons <- list(c("Balbc -> B6(Ab+Gav-) day21", "Balbc -> B6(Ab+Gav+) day21"), c("Balbc -> B6(Ab+Gav-) day21", "Balbc -> B6(Ab-Gav-)"), c("Balbc -> B6(Ab+Gav-) day21", "Control"), c("Balbc -> B6(Ab+Gav+) day21", "Balbc -> B6(Ab-Gav-)"), c("Control", "Balbc -> B6(Ab-Gav-)"))
+
+(inv_simpson %>% 
+  ggboxplot(x = "treatment", y = "inv_simpson",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(comparisons = my_comparisons,method = "wilcox", label = "p.signif") +
+    labs(x = NULL, y = "Inverse Simpson Index", color = NULL) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+)
+ggsave("data/lefse/for_resubmission/2019_additional_2_Simpson_stats.pdf",scale = 2.75, width = 3, height = 2, dpi =600)
+
+```
+
+Export for external lefse
+```{r}
+addtl_2_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2019",
+         group %in% c("addtl_1", "addtl_2", "addtl_3", "DefNaive/naive/SPFnaive")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- addtl_2_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+addtl_2_ext_lefse2 <- addtl_2_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2019_103`)) %>% 
+  write_tsv("data/lefse/addtl_2_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py addtl_2_data.tsv  addtl_2_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py addtl_2_data.txt addtl_2_data.res -l 2
+
+lefse_plot_res.py addtl_2_data.res addtl_2_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py addtl_2_data.res addtl_2_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+### Two
+Keisuke requested PCoA, Cladogram & LEfSe analysis for the the following groups:
+  - 2019data: DefAVehicle (71-78) vs DefADef(88,89, 100, 101, 102, 187, 188, 75, 90):  vs  Control group (103, 109, 41, 23, 47): PCoA, Cladogram, and LEfSe analysis
+
+  
+```{r}
+
+#remotes::install_github("GuillemSalazar/EcolUtils")
+comparisons <- metadata %>%
+  filter(group %in% c("DefAVehicle","DefADef", "DefNaive/naive/SPFnaive")) %>% 
+  mutate(treatment = group,
+         treatment = if_else(group == "DefNaive/naive/SPFnaive", "Control", treatment),
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+dat_for_BC <- OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "OTU"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_manual(values = c("black","red","blue")) +
+  #scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/2019_additional_3_PCoA.pdf", width = 3, height = 2, scale = 2)
+
+# Inv Simpson diversity data
+  
+inv_simpson <- vegan::diversity(dat_for_BC, index = "invsimpson") %>% 
+  data.frame(inv_simpson = ., sample = names(.)) %>% 
+  left_join(comparisons) %>% 
+  write_tsv("data/lefse/for_resubmission/2019_additional_3_Simpson.tsv")
+
+inv_simpson %>% 
+  ggplot(aes(treatment, inv_simpson, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(y = "Inverse Simpson Index", x = NULL, fill = NULL) +
+  scale_fill_viridis_d(end = 0.75,option = "A") +
+  theme_bw() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        legend.direction = "vertical")
+ggsave("data/lefse/for_resubmission/2019_additional_3_Simpson.pdf", width = 1.25, height = 2, dpi = 300, scale =2)
+
+```
+
+Export for external lefse
+```{r}
+addtl_3_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2019",
+         group %in% c("DefADef", "DefAVehicle", "DefNaive/naive/SPFnaive")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- addtl_3_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+addtl_3_ext_lefse2 <- addtl_3_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2019_103`)) %>% 
+  write_tsv("data/lefse/addtl_3_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py addtl_3_data.tsv  addtl_3_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py addtl_3_data.txt addtl_3_data.res -l 2
+
+lefse_plot_res.py addtl_3_data.res addtl_3_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py addtl_3_data.res addtl_3_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+# 2022 datasets for reviewer requests
+
+### Charles river B6, BMT1481 
+```{r}
+
+comparisons <- metadata %>% 
+  filter(group %in% c("aa", "ab", "ac")) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/Charles_River_abund.pdf", scale = 4, width = 2, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "OTU"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/Charles_River_PCoA.pdf", width = 3, height = 2, scale = 2)
+
+# Inv Simpson diversity data
+  
+inv_simpson <- vegan::diversity(dat_for_BC, index = "invsimpson") %>% 
+  data.frame(inv_simpson = ., sample = names(.)) %>% 
+  left_join(comparisons) %>% 
+  write_tsv("data/lefse/for_resubmission/Charles_River_Simpson.tsv")
+
+inv_simpson %>% 
+  ggplot(aes(treatment, inv_simpson, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(y = "Inverse Simpson Index", x = NULL, fill = NULL) +
+  scale_fill_viridis_d(end = 0.75,option = "A") +
+  theme_bw() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        legend.direction = "vertical")
+ggsave("data/lefse/for_resubmission/Charles_River_Simpson.pdf", width = 1.25, height = 2, dpi = 300, scale =2)
+
+my_comparisons <- list(c("day7 Allogeneic", "day7 Syngeneic"), c("day7 Syngeneic", "naive before BMT"), c("day7 Allogeneic", "naive before BMT"))
+
+(inv_simpson %>% 
+  ggboxplot(x = "treatment", y = "inv_simpson",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(comparisons = my_comparisons,method = "wilcox", label = "p.signif") +
+    labs(x = NULL, y = "Inverse Simpson Index", color = NULL) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+)
+ggsave("data/lefse/for_resubmission/Charles_River_Simpson_stats.pdf",scale = 2.5, width = 2, height = 2, dpi =600)
+
+```
+#### Export for external lefse
+```{r}
+Charles_River_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("aa", "ab", "ac")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- Charles_River_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+Charles_River_ext_lefse2 <- Charles_River_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022a_1`)) %>% 
+  write_tsv("data/lefse/Charles_River_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py Charles_River_data.tsv  Charles_River_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py Charles_River_data.txt Charles_River_data.res -l 2
+
+lefse_plot_res.py Charles_River_data.res Charles_River_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py Charles_River_data.res Charles_River_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+### Taconic B6 BMT, BMT1488
+```{r}
+comparisons <- metadata %>% 
+  filter(group %in% c("ad", "ae", "af")) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/Taconic_abund.pdf", scale = 4, width = 2, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "OTU"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/Taconic_PCoA.pdf", width = 3, height = 2, scale = 2)
+
+# Inv Simpson diversity data
+  
+inv_simpson <- vegan::diversity(dat_for_BC, index = "invsimpson") %>% 
+  data.frame(inv_simpson = ., sample = names(.)) %>% 
+  left_join(comparisons) %>% 
+  write_tsv("data/lefse/for_resubmission/Taconic_Simpson.tsv")
+
+inv_simpson %>% 
+  ggplot(aes(treatment, inv_simpson, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(y = "Inverse Simpson Index", x = NULL, fill = NULL) +
+  scale_fill_viridis_d(end = 0.75,option = "A") +
+  theme_bw() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        legend.direction = "vertical")
+ggsave("data/lefse/for_resubmission/Taconic_Simpson.pdf", width = 1.25, height = 2, dpi = 300, scale =2)
+
+my_comparisons <- list(c("day7 Allogeneic", "day7 Syngeneic"), c("day7 Syngeneic", "naive before BMT"), c("day7 Allogeneic", "naive before BMT"))
+
+(inv_simpson %>% 
+  ggboxplot(x = "treatment", y = "inv_simpson",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(comparisons = my_comparisons,method = "wilcox", label = "p.signif") +
+    labs(x = NULL, y = "Inverse Simpson Index", color = NULL) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+)
+ggsave("data/lefse/for_resubmission/Taconic_Simpson_stats.pdf",scale = 2.5, width = 2, height = 2, dpi =600)
+```
+
+#### Export for external lefse
+```{r}
+Taconic_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("ad", "ae", "af")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- Taconic_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+Taconic_ext_lefse2 <- Taconic_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022a_19`)) %>% 
+  write_tsv("data/lefse/Taconic_data.tsv")
+
+```
+
+```{zsh include=FALSE}
+lefse_format_input.py Taconic_data.tsv  Taconic_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py Taconic_data.txt Taconic_data.res -l 2
+
+lefse_plot_res.py Taconic_data.res Taconic_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py Taconic_data.res Taconic_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+### JAX BDF1, BMT1487
+```{r}
+comparisons <- metadata %>% 
+  filter(group %in% c("ag", "ah", "ai")) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/JAX_abund.pdf", scale = 4, width = 2, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "OTU"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/JAX_PCoA.pdf", width = 3, height = 2, scale = 2)
+
+# Inv Simpson diversity data
+  
+inv_simpson <- vegan::diversity(dat_for_BC, index = "invsimpson") %>% 
+  data.frame(inv_simpson = ., sample = names(.)) %>% 
+  left_join(comparisons) %>% 
+  write_tsv("data/lefse/for_resubmission/JAX_Simpson.tsv")
+
+inv_simpson %>% 
+  ggplot(aes(treatment, inv_simpson, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(y = "Inverse Simpson Index", x = NULL, fill = NULL) +
+  scale_fill_viridis_d(end = 0.75,option = "A") +
+  theme_bw() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        legend.direction = "vertical")
+ggsave("data/lefse/for_resubmission/JAX_Simpson.pdf", width = 1.25, height = 2, dpi = 300, scale =2)
+
+my_comparisons <- list(c("day7 Allogeneic", "day7 Syngeneic"), c("day7 Syngeneic", "naive before BMT"), c("day7 Allogeneic", "naive before BMT"))
+
+(inv_simpson %>% 
+  ggboxplot(x = "treatment", y = "inv_simpson",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(comparisons = my_comparisons,method = "wilcox", label = "p.signif") +
+    labs(x = NULL, y = "Inverse Simpson Index", color = NULL) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+)
+ggsave("data/lefse/for_resubmission/JAX_Simpson_stats.pdf",scale = 2.5, width = 2, height = 2, dpi =600)
+```
+
+#### Export for external lefse
+```{r}
+JAX_BDF1_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("ag", "ah", "ai")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- JAX_BDF1_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+JAX_BDF1_ext_lefse2 <- JAX_BDF1_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022a_39`)) %>% 
+  write_tsv("data/lefse/JAX_BDF1_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py JAX_BDF1_data.tsv  JAX_BDF1_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py JAX_BDF1_data.txt JAX_BDF1_data.res -l 2
+
+lefse_plot_res.py JAX_BDF1_data.res JAX_BDF1_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py JAX_BDF1_data.res JAX_BDF1_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+### C3H.SW, BMT1485
+```{r}
+comparisons <- metadata %>% 
+  filter(group %in% c("aj", "ak", "al")) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/C3H.SW_abund.pdf", scale = 4, width = 2, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(!any_of(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "OTU"))) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() %>% 
+  .[comparisons$sample,]
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/C3H.SW_PCoA.pdf", width = 3, height = 2, scale = 2)
+
+# Inv Simpson diversity data
+  
+inv_simpson <- vegan::diversity(dat_for_BC, index = "invsimpson") %>% 
+  data.frame(inv_simpson = ., sample = names(.)) %>% 
+  left_join(comparisons) %>% 
+  write_tsv("data/lefse/for_resubmission/C3H.SW_Simpson.tsv")
+
+inv_simpson %>% 
+  ggplot(aes(treatment, inv_simpson, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(y = "Inverse Simpson Index", x = NULL, fill = NULL) +
+  scale_fill_viridis_d(end = 0.75,option = "A") +
+  theme_bw() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        legend.direction = "vertical")
+ggsave("data/lefse/for_resubmission/C3H.SW_Simpson.pdf", width = 1.25, height = 2, dpi = 300, scale =2)
+
+my_comparisons <- list(c("day7 Allogeneic", "day7 Syngeneic"), c("day7 Syngeneic", "naive before BMT"), c("day7 Allogeneic", "naive before BMT"))
+
+(inv_simpson %>% 
+  ggboxplot(x = "treatment", y = "inv_simpson",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(comparisons = my_comparisons,method = "wilcox", label = "p.signif") +
+    labs(x = NULL, y = "Inverse Simpson Index", color = NULL) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+)
+ggsave("data/lefse/for_resubmission/C3H.SW_Simpson_stats.pdf",scale = 2.5, width = 2, height = 2, dpi =600)
+
+```
+
+#### Export for external lefse
+```{r}
+CH3.SW_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("aj", "ak", "al")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- CH3.SW_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+CH3.SW_ext_lefse2 <- CH3.SW_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022a_59`)) %>% 
+  write_tsv("data/lefse/CH3.SW_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py CH3.SW_data.tsv  CH3.SW_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py CH3.SW_data.txt CH3.SW_data.res -l 2
+
+lefse_plot_res.py CH3.SW_data.res CH3.SW_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py CH3.SW_data.res CH3.SW_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+### GF#1 with Syn or Allo stool
+```{r}
+comparisons <- metadata %>% 
+  filter(group %in% c("ab", "ac", "am", "ao", "an", "ap", "aq")) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment, levels = c("GF pre stool gavage", "day7 Syngeneic", "day7 GF + Syn stool", "day14 GF + Syn stool", "day7 Allogeneic", "day7 GF + Allo stool", "day14 GF + Allo stool"), ordered = TRUE)) %>% 
+  select(sample, group, treatment)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/GF#1_abund.pdf", scale = 4, width = 4, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(any_of(comparisons$sample), taxonomy) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() 
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_discrete() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  #scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/GF#1_PCoA.pdf", width = 3, height = 2, scale = 2)
+
+# Inv Simpson diversity data
+  
+inv_simpson <- vegan::diversity(dat_for_BC, index = "invsimpson") %>% 
+  data.frame(inv_simpson = ., sample = names(.)) %>% 
+  left_join(comparisons) %>% 
+  write_tsv("data/lefse/for_resubmission/GF#1_Simpson.tsv")
+
+inv_simpson %>% 
+  ggplot(aes(treatment, inv_simpson, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(y = "Inverse Simpson Index", x = NULL, fill = NULL) +
+  scale_fill_viridis_d(end = 0.75,option = "A") +
+  theme_bw() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        legend.direction = "vertical")
+ggsave("data/lefse/for_resubmission/GF#1_Simpson.pdf", width = 1.25, height = 2, dpi = 300, scale =2)
+
+
+my_comparisons <- list(c("day7 Allogeneic", "day7 Syngeneic"), c("day7 Syngeneic", "naive before BMT"), c("day7 Allogeneic", "naive before BMT"))
+
+treatments <- inv_simpson$treatment %>% unique %>% as.character() %>%  combn(x = .,m = 2, simplify = TRUE) %>% t()
+
+list_fun <- function(x) {
+  pair <- c(paste0(treatments[x,1]), paste0(treatments[x,2])) %>% as.character()
+}
+
+treatment_pairs <- lapply(1:nrow(treatments), list_fun)
+
+(inv_simpson %>% 
+  ggboxplot(x = "treatment", y = "inv_simpson",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(comparisons = treatment_pairs,method = "wilcox", label = "p.signif") +
+    labs(x = NULL, y = "Inverse Simpson Index", color = NULL) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+)
+ggsave("data/lefse/for_resubmission/GF#1_Simpson_stats.pdf",scale = 2.5, width = 2, height = 2, dpi =600)
+
+```
+
+#### Export for external lefse
+```{r}
+GF1_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("am", "an", "ao", "ap", "aq")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- GF1_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+GF1_ext_lefse2 <- GF1_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022a_75`)) %>% 
+  write_tsv("data/lefse/GF1_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py GF1_data.tsv  GF1_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py GF1_data.txt GF1_data.res -l 2
+
+lefse_plot_res.py GF1_data.res GF1_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py GF1_data.res GF1_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+### Compare different mouse suppliers (2022 data)
+```{r}
+
+mouse_source_samples <- paste0("a",letters[1:12])
+
+comparisons <- metadata %>% 
+  filter(group %in% mouse_source_samples) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment)) %>% 
+  select(sample, group, treatment, mouse_type)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment, mouse_type) %>% 
+  summarise(abund = sum(abund)) %>% 
+  group_by(treatment, mouse_type) %>%
+  mutate(sample = as.numeric(factor(sample)),
+         treatment = factor(treatment, c("naive before BMT", "day7 Syngeneic", "day7 Allogeneic"))) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid( mouse_type ~ treatment, scales = "free_x",space = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/supplier_abund_comparison.pdf", scale = 3, width = 3, height = 3, dpi = 300)
+```
+
+
+#### Export for external lefse
+```{r}
+supplier_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% mouse_source_samples) %>%
+  mutate(treatment = Description) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- supplier_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment",
+         abund = str_replace_all(abund, " ", "_")) %>% 
+  distinct()
+
+supplier_lefse2 <- supplier_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022a_59`)) %>% 
+  write_tsv("data/lefse/supplier_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py supplier_data.tsv  supplier_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py supplier_data.txt supplier_data.res -l 2
+
+lefse_plot_res.py supplier_data.res supplier_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py supplier_data.res supplier_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+### Followup requests
+
+### One
+
+day7 syngeneic (Charles river B6, BMT1481, #10-14)--ab
+day7 syn stool (#75-78)--am
+day14 syn stool (#83-86)--ao
+day7 allogeneic(Charles river B6, BMT1481, #15-18)--ac
+day7 allo stool(#79-82)--an
+day14 allo stool (#87-90)--ap
+
+
+```{r}
+comparisons <- metadata %>% 
+  filter(group %in% c("ab", "am", "ao", "ac", "an", "ap")) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment, levels = c("GF pre stool gavage", "day7 Syngeneic", "day7 GF + Syn stool", "day14 GF + Syn stool", "day7 Allogeneic", "day7 GF + Allo stool", "day14 GF + Allo stool"), ordered = TRUE)) %>% 
+  select(sample, group, treatment)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/2022_addtl_one_abund.pdf", scale = 4, width = 4, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(any_of(comparisons$sample), taxonomy) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() 
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_discrete() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  #scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/2022_addtl_one_PCoA.pdf", width = 3, height = 2, scale = 2)
+
+
+
+```
+
+#### Export for external lefse
+```{r}
+addtl_2022_one_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("ab", "am", "ao", "ac", "an", "ap")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- addtl_2022_one_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+addtl_2022_one_ext_lefse2 <- addtl_2022_one_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022a_75`)) %>% 
+  write_tsv("data/lefse/2022_addtl_one_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py 2022_addtl_one_data.tsv  2022_addtl_one_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py 2022_addtl_one_data.txt 2022_addtl_one_data.res -l 2
+
+lefse_plot_res.py 2022_addtl_one_data.res 2022_addtl_one_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py 2022_addtl_one_data.res 2022_addtl_one_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+### Two
+
+day7 syn stool (#75-78)--am
+day14 syn stool (#83-86)--ao
+day7 allo stool(#79-82)--an
+day14 allo stool (#87-90)--ap
+
+
+```{r}
+comparisons <- metadata %>% 
+  filter(group %in% c("am", "ao", "an", "ap")) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment, levels = c("GF pre stool gavage", "day7 Syngeneic", "day7 GF + Syn stool", "day14 GF + Syn stool", "day7 Allogeneic", "day7 GF + Allo stool", "day14 GF + Allo stool"), ordered = TRUE)) %>% 
+  select(sample, group, treatment)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/2022_addtl_two_abund.pdf", scale = 4, width = 4, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(any_of(comparisons$sample), taxonomy) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() 
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_discrete() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  #scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/2022_addtl_two_PCoA.pdf", width = 3, height = 2, scale = 2)
+```
+
+#### Export for external lefse
+```{r}
+addtl_2022_two_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("am", "ao", "an", "ap")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- addtl_2022_two_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+addtl_2022_two_ext_lefse2 <- addtl_2022_two_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022a_75`)) %>% 
+  write_tsv("data/lefse/2022_addtl_two_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py 2022_addtl_two_data.tsv  2022_addtl_two_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py 2022_addtl_two_data.txt 2022_addtl_two_data.res -l 2
+
+lefse_plot_res.py 2022_addtl_two_data.res 2022_addtl_two_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py 2022_addtl_two_data.res 2022_addtl_two_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+### Three (11/8/2022)
+
+day7 syn stool (#75-78)--am
+day7 allo stool(#79-82)--an
+
+```{r}
+comparisons <- metadata %>% 
+  filter(group %in% c("am", "an")) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment, levels = c("day7 GF + Syn stool", "day7 GF + Allo stool"), ordered = TRUE)) %>% 
+  select(sample, group, treatment)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/2022_addtl_three_abund.pdf", scale = 4, width = 4, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(any_of(comparisons$sample), taxonomy) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() 
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_discrete() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  #scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/2022_addtl_three_PCoA.pdf", width = 3, height = 2, scale = 2)
+```
+
+#### Export for external lefse
+```{r}
+addtl_2022_three_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("am", "an")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- addtl_2022_three_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+addtl_2022_three_ext_lefse2 <- addtl_2022_three_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022a_75`)) %>% 
+  write_tsv("data/lefse/2022_addtl_three_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py 2022_addtl_three_data.tsv  2022_addtl_three_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py 2022_addtl_three_data.txt 2022_addtl_three_data.res -l 2
+
+lefse_plot_res.py 2022_addtl_three_data.res 2022_addtl_three_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py 2022_addtl_three_data.res 2022_addtl_three_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+
+
+
+### Four (11/8/2022)
+
+day14 syn stool (#83-86)--ao
+day14 allo stool (#87-90)--ap
+
+```{r}
+comparisons <- metadata %>% 
+  filter(group %in% c("ao", "ap")) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment, levels = c("day14 GF + Syn stool", "day14 GF + Allo stool"), ordered = TRUE)) %>% 
+  select(sample, group, treatment)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/2022_addtl_four_abund.pdf", scale = 4, width = 4, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(any_of(comparisons$sample), taxonomy) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() 
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_discrete() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  #scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) 
+  ggsave("data/lefse/for_resubmission/2022_addtl_four_PCoA.pdf", width = 3, height = 2, scale = 2)
+```
+
+
+#### Export for external lefse
+```{r}
+addtl_2022_four_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("ao", "ap")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- addtl_2022_four_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+addtl_2022_four_ext_lefse2 <- addtl_2022_four_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022a_83`)) %>% 
+  write_tsv("data/lefse/2022_addtl_four_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py 2022_addtl_four_data.tsv  2022_addtl_four_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py 2022_addtl_four_data.txt 2022_addtl_four_data.res -l 2
+
+lefse_plot_res.py 2022_addtl_four_data.res 2022_addtl_four_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py 2022_addtl_four_data.res 2022_addtl_four_data_cladogram.pdf --format pdf --dpi 600
+```
+
+
+
+# 2022 plate 2
+
+### One
+
+```{r}
+comparisons <- metadata %>% 
+  filter(group %in% c("ba", "bb")) %>% 
+  mutate(treatment = Description,
+         treatment = factor(treatment, levels = c("day7 Allo with Syn stool", "day7 Allo with Allo stool"), ordered = TRUE)) %>% 
+  select(sample, group, treatment)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus),
+         Genus = if_else(Genus == "Bacteria_unclassified", "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = fct_relevel(Genus,"Other",after =12))) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL,
+       fill = "Genus") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/2022B_one_abund.pdf", scale = 2, width = 3, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(any_of(comparisons$sample), taxonomy) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() 
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_discrete() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  #scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) +
+  theme(legend.spacing.y = unit(0.3, 'cm'))  +
+  guides(color = guide_legend(byrow = TRUE))
+  ggsave("data/lefse/for_resubmission/2022B_one_PCoA.pdf", width = 3, height = 2, scale = 2)
+  
+  
+# Inv Simpson diversity data
+  
+inv_simpson <- vegan::diversity(dat_for_BC, index = "invsimpson") %>% 
+  data.frame(inv_simpson = ., sample = names(.)) %>% 
+  left_join(comparisons) %>% 
+  write_tsv("data/lefse/for_resubmission/2022B_one_Simpson.tsv")
+
+inv_simpson %>% 
+  ggplot(aes(treatment, inv_simpson, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(y = "Inverse Simpson Index", x = NULL, fill = NULL) +
+  #scale_fill_viridis_d(end = 0.75,option = "A") +
+  scale_fill_discrete() +
+  theme_bw() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        legend.direction = "vertical")
+ggsave("data/lefse/for_resubmission/2022B_one_Simpson.pdf", width = 1.25, height = 2, dpi = 300, scale =2)
+
+
+my_comparisons <- list(c("day7 Allo with Syn stool", "day7 Allo with Allo stool"))
+
+treatments <- inv_simpson$treatment %>% unique %>% as.character() %>%  combn(x = .,m = 2, simplify = TRUE) %>% t()
+
+list_fun <- function(x) {
+  pair <- c(paste0(treatments[x,1]), paste0(treatments[x,2])) %>% as.character()
+}
+
+treatment_pairs <- lapply(1:nrow(treatments), list_fun)
+
+(inv_simpson %>% 
+  ggboxplot(x = "treatment", y = "inv_simpson",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(comparisons = treatment_pairs,method = "wilcox", label = "p.signif") +
+    labs(x = NULL, y = "Inverse Simpson Index", color = NULL) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          legend.position = "bottom",
+          legend.direction = "vertical",
+          legend.spacing.y = unit(0.3, 'cm'))  +
+  guides(color = guide_legend(byrow = TRUE))
+)
+ggsave("data/lefse/for_resubmission/2022B_one_Simpson_stats.pdf",scale = 2, width = 2, height = 3, dpi =600)
+```
+
+#### Export for external lefse
+```{r}
+plate2_2022_one_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("ba", "bb")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- plate2_2022_one_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+plate2_2022_one_ext_lefse2 <- plate2_2022_one_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022b_1`)) %>% 
+  write_tsv("data/lefse/plate2_2022_one_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py plate2_2022_one_data.tsv  plate2_2022_one_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py plate2_2022_one_data.txt plate2_2022_one_data.res -l 2
+
+lefse_plot_res.py plate2_2022_one_data.res plate2_2022_one_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py plate2_2022_one_data.res plate2_2022_one_cladogram.pdf --format pdf --dpi 600
+```
+
+### Two
+
+```{r}
+comparisons <- metadata %>% 
+  filter(group %in% c("bc", "bd", "be", "bf", "bg")) %>% 
+  mutate(treatment = Description,
+         treatment = case_when(treatment == "B6Ab d14 after co-housed with syn" ~ "B6Ab d14 after\nco-housed with syn",
+                               treatment == "B6Ab d14 after co-housed with allo" ~ "B6Ab d14 after\nco-housed with allo",
+                               treatment == "B6Ab  before co-housing" ~ "B6Ab  before\nco-housing",
+                               TRUE ~ treatment),
+         treatment = factor(treatment, levels = c("day14 Syngeneic", "day14 Allogeneic", "B6Ab  before\nco-housing", "B6Ab d14 after\nco-housed with syn", "B6Ab d14 after\nco-housed with allo"), ordered = TRUE)) %>% 
+  select(sample, group, treatment)
+
+genus_rel_abund %>% 
+  filter(sample %in% comparisons$sample) %>% 
+  left_join(comparisons) %>%
+  mutate(Genus = if_else(abund < 0.01, "Other", Genus)) %>% 
+  group_by(Genus, sample, treatment) %>% 
+  summarise(abund = sum(abund)) %>% 
+  ggplot(aes(sample, abund * 100, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~treatment, scales = "free_x") +
+  labs(y = "Percent abundance",
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave("data/lefse/for_resubmission/2022B_two_abund.pdf", scale = 2.5, width = 4, height = 2, dpi = 300)
+
+dat_for_BC <- norm_OTU_rel_abund_wide_unmod %>% 
+  ungroup() %>% 
+  mutate(taxonomy = paste(Kingdom, Phylum, Class, Order, Family, Genus, OTU, sep = "; ")) %>% 
+  dplyr::select(any_of(comparisons$sample), taxonomy) %>% 
+  column_to_rownames("taxonomy") %>% 
+  t() 
+ 
+BC_raw <- vegan::vegdist(dat_for_BC)
+
+# NMDS 
+
+nmds <- vegan::monoMDS(BC_raw)
+
+nmds_points <- nmds$points %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  left_join(comparisons)
+
+(nmds_points %>% ggplot(aes(MDS1,MDS2, color = treatment)) + geom_point() + theme_bw() ) %>% plotly::ggplotly()
+
+# PCOA
+
+pcoa <- ape::pcoa(BC_raw)
+
+pcoa_points <- pcoa$vectors %>% as.data.frame() %>% rownames_to_column("sample") %>% left_join(comparisons)
+
+pcoa_points %>% 
+  ggplot(aes(Axis.1, Axis.2, color = treatment)) +
+  geom_point() +
+  stat_ellipse() +
+  theme_minimal() +
+  scale_color_discrete() +
+  #scale_color_manual(values = c("blue","black","goldenrod1","pink","red")) +
+  #scale_color_viridis_d(end = 0.75,option = "A") +
+  labs(color = NULL,
+       x = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[1] * 100,1)}%)"),
+       y = glue::glue("Axis 1 ({round(pcoa$values$Relative_eig[2] * 100,1)}%)")) +
+  theme(legend.spacing.y = unit(0.3, 'cm')) +
+    guides(color = guide_legend(byrow = TRUE)) 
+  ggsave("data/lefse/for_resubmission/2022B_two_PCoA.pdf", width = 3, height = 2, scale = 2)
+  
+  
+# Inv Simpson diversity data
+  
+inv_simpson <- vegan::diversity(dat_for_BC, index = "invsimpson") %>% 
+  data.frame(inv_simpson = ., sample = names(.)) %>% 
+  left_join(comparisons) %>% 
+  write_tsv("data/lefse/for_resubmission/2022B_two_Simpson.tsv")
+
+inv_simpson %>% 
+  ggplot(aes(treatment, inv_simpson, fill = treatment)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  labs(y = "Inverse Simpson Index", x = NULL, fill = NULL) +
+  #scale_fill_viridis_d(end = 0.75,option = "A") +
+  scale_fill_discrete() +
+  theme_bw() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_text(angle = -35, hjust = 0, vjust = 1),
+        legend.position = "none")
+    #     legend.position = "bottom",
+    #     legend.direction = "vertical",
+    #     legend.spacing.y = unit(0.2, 'cm')) +
+    # guides(fill = guide_legend(byrow = TRUE))
+
+ggsave("data/lefse/for_resubmission/2022B_two_Simpson.pdf", width = 2, height = 2, dpi = 300, scale =2)
+
+
+#my_comparisons <- list(c("day7 Allo with Syn stool", "day7 Allo with Allo stool"))
+
+treatments <- inv_simpson$treatment %>% unique %>% as.character() %>%  combn(x = .,m = 2, simplify = TRUE) %>% t()
+
+list_fun <- function(x) {
+  pair <- c(paste0(treatments[x,1]), paste0(treatments[x,2])) %>% as.character()
+}
+
+treatment_pairs <- lapply(1:nrow(treatments), list_fun)
+
+(inv_simpson %>% 
+  ggboxplot(x = "treatment", y = "inv_simpson",
+          color = "treatment", palette = "jco",
+          add = "jitter") +
+  stat_compare_means(comparisons = treatment_pairs,method = "wilcox", label = "p.signif") +
+    labs(x = NULL, y = "Inverse Simpson Index", color = NULL) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          legend.position = "bottom")  +
+  guides(color = guide_legend(byrow = TRUE))
+)
+
+ggsave("data/lefse/for_resubmission/2022B_two_Simpson_stats.pdf",scale = 3, width = 2.75, height = 1.5, dpi =600)
+```
+
+#### Export for external lefse
+```{r}
+plate2_2022_two_ext_lefse <- rel_abund_w_O2_sens_unmod %>% 
+  filter(year == "2022",
+         group %in% c("bc", "bd", "be", "bf", "bg")) %>%
+  mutate(treatment = group) %>% 
+  ungroup() %>% 
+  group_by(sample,group,treatment,O2_sensitivity, Kingdom, Phylum, Class, Order, Family, Genus) %>% 
+  summarise(abund = sum(abund)*100) %>% 
+  mutate(tax_string = paste(Kingdom, Phylum, Class, Order, Family, Genus,sep = "|")) %>% 
+  ungroup() %>% 
+  select(treatment, sample,tax_string,abund)
+
+treatments <- plate2_2022_two_ext_lefse %>% 
+  select(abund = "treatment",sample) %>% 
+  mutate(tax_string = "treatment") %>% 
+  distinct()
+
+plate2_2022_two_ext_lefse2 <- plate2_2022_two_ext_lefse %>% 
+  mutate(abund = as.character(abund)) %>% 
+  bind_rows(treatments) %>% 
+  pivot_wider(-treatment, id_expand = FALSE, names_from = sample, values_from = abund,values_fill = "0") %>% 
+  #column_to_rownames("tax_string") %>% 
+  ungroup() %>% 
+  arrange(desc(`2022b_23`)) %>% 
+  write_tsv("data/lefse/plate2_2022_two_data.tsv")
+
+```
+
+
+```{zsh include=FALSE}
+lefse_format_input.py plate2_2022_two_data.tsv  plate2_2022_two_data.txt -c 2 -u 1 -o 1000000
+
+lefse_run.py plate2_2022_two_data.txt plate2_2022_two_data.res -l 2
+
+lefse_plot_res.py plate2_2022_two_data.res plate2_2022_two_data.pdf --dpi 600 --format pdf
+
+lefse_plot_cladogram.py plate2_2022_two_data.res plate2_2022_two_cladogram.pdf --format pdf --dpi 600
+```
+
+
+

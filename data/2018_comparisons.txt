@@ -1,0 +1,6 @@
+grp 1 vs. 2
+grp 2 vs. 3 vs. 6
+grp 1 vs. 10
+grp 2 vs. 9 vs. 11 vs. 12
+grp 2 vs. 4 vs. 5
+grp 2 vs. 7 vs. 8

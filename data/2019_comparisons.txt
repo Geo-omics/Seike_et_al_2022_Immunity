@@ -1,0 +1,11 @@
+DefAVehicle vs. DefADef
+
+Allostrecip vs. Synstrecip
+
+SynstAllo vs. AllostAllo
+
+# extra III  see email from Keisuke, Jan 5th, 2022 / 2019 data figure 1
+naive vs. SPFSyn vs. SPFAllo
+
+# extra VI  see email from Keisuke, Jan 5th, 2022 / 2019 data figure 2
+SPFSyn vs. SPFAllo
